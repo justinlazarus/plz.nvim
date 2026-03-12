@@ -706,3 +706,28 @@ Busted with `nlua` adapter — the current Neovim plugin standard.
 5. **Phase 5: Cross-revision review** — Persist reviewed SHAs, compute revision diffs, overlay previous comments with status indicators.
 
 6. **Phase 6: Polish** — Thread exploration from worktree buffers, orphaned thread handling, auto-refresh, edge cases.
+
+## Implementation Status
+
+### Phase 2: Difftastic rendering — DONE
+- `difft --display=json` parsing and normalization (`difftastic.lua`)
+- Side-by-side aligned layout with filler lines (`align.lua`, `layout.lua`)
+- Token-level green/red highlights matching difftastic output (`render.lua`)
+- Colored line numbers via custom `statuscolumn` (real numbers or `·` for fillers)
+- Scroll sync (`scrollbind` + `cursorbind`) and `]h`/`[h` hunk navigation
+- `:PlzDiff <old> <new>` command for local file comparison
+- Design choice: no treesitter/syntax highlighting in diff buffers — plain text with diff highlights only, matching difftastic's terminal style
+
+### Phase 1: Dashboard — IN PROGRESS
+- `gh.lua` async wrapper around `gh` CLI with JSON parsing
+- Dashboard opens via `:Plz` in a new tab with top/bottom split (PR list + preview)
+- Three sections: Review Requested, My PRs, All Open (tab switching with `1`/`2`/`3` or `Tab`)
+- PR table columns matching gh-dash compact mode: state icon, #number, title, author, review, CI, +/-, age
+- Nerd font icons matching gh-dash: `` open, `` draft, `󰄬` approved, `` CI pass, `󰅙` CI fail, `` pending
+- Color scheme matching gh-dash: `#42A0FA` open, `#A371F7` merged, `#3DF294` success, `#E06C75` error, `#E5C07B` warning
+- Column alignment via shared `build_row` with display-width-aware padding
+- Preview pane: branch/author, status, CI summary, ADO work item placeholder, reviewer/thread placeholders
+- ADO work item extraction from PR title or body (`AB#NNNN` pattern)
+- `ado.lua` module for ADO REST API integration (type, state, assignee, tags — single line in preview)
+- Keybindings: `j/k` nav, `<CR>` open, `o` browser, `r` refresh, `q` close, `?` help
+- Preview updates on `CursorMoved`

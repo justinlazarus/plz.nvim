@@ -18,3 +18,9 @@ end, {
   complete = "file",
   desc = "Open difftastic side-by-side diff view",
 })
+
+vim.api.nvim_create_user_command("Plz", function()
+  require("plz.dashboard").open()
+end, {
+  desc = "Open plz dashboard",
+})
