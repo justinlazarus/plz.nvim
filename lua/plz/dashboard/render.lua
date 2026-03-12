@@ -43,8 +43,11 @@ M.icons = {
   ado_none  = u(0xf073a),
   ado_h     = u(0xf0ae),
   release   = u(0xf427),
-  -- Git
+  -- Git / Commits
   branch   = u(0xe725),
+  commit   = u(0xf4b6),  -- CommitIcon (section heading)
+  v_commit = u(0xf0718), -- VerticalCommitIcon 󰜘 (per-commit)
+  h_line   = u(0x2500),  -- ─ HorizontalLineIcon
   -- Misc (from gh-dash constants.go)
   dot      = u(0xf444),  -- DotIcon
   person   = u(0xf415),  -- PersonIcon

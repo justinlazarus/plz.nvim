@@ -17,6 +17,12 @@ local state = {
   -- Summary (fixed header)
   summary_buf = nil,
   summary_win = nil,
+  summary_view = "info", -- "info" | "commits" | "description"
+  commits = nil,         -- fetched commit list (nil = not loaded)
+  commit_mode = false,   -- true when viewing a single commit
+  commit_sha = nil,      -- full OID of selected commit
+  commit_parent_sha = nil,
+  pr_files = nil,        -- stashed full PR file list
   -- File list (scrollable)
   buf = nil,
   win = nil,
@@ -25,6 +31,8 @@ local state = {
   diff_rhs_win = nil,
   diff_lhs_buf = nil,
   diff_rhs_buf = nil,
+  diff_status_win = nil,
+  diff_status_buf = nil,
   current_file_idx = nil,
   ado_item = nil,
 }
@@ -48,6 +56,20 @@ function M.open(pr)
 
   vim.notify("plz: loading PR #" .. pr.number .. "…", vim.log.levels.INFO)
 
+  -- Fetch files and commits in parallel
+  local pending_open = 2
+  local function try_show()
+    pending_open = pending_open - 1
+    if pending_open > 0 then return end
+    if #state.files == 0 then
+      vim.notify("plz: no changed files", vim.log.levels.INFO)
+      return
+    end
+    M._ensure_commits(function()
+      M._show_file_list()
+    end)
+  end
+
   gh.run({
     "api", string.format("repos/%s/%s/pulls/%d/files?per_page=100", owner, repo, pr.number),
   }, function(files, err)
@@ -55,16 +77,12 @@ function M.open(pr)
       vim.notify("plz: " .. err, vim.log.levels.ERROR)
       return
     end
-
     state.files = files or {}
-    if #state.files == 0 then
-      vim.notify("plz: no changed files", vim.log.levels.INFO)
-      return
-    end
+    try_show()
+  end)
 
-    M._ensure_commits(function()
-      M._show_file_list()
-    end)
+  M._fetch_commits(owner, repo, pr.number, function()
+    try_show()
   end)
 end
 
@@ -135,6 +153,427 @@ function M._show_file_list()
 
   if #state.files > 0 then
     pcall(vim.api.nvim_win_set_cursor, state.win, { 1, 0 })
+  end
+end
+
+--- Fetch PR commits via GraphQL (mirrors gh-dash's allCommits query).
+--- @param owner string
+--- @param repo string
+--- @param pr_number number
+--- @param callback function
+function M._fetch_commits(owner, repo, pr_number, callback)
+  local query = string.format([[
+query {
+  repository(owner: "%s", name: "%s") {
+    pullRequest(number: %d) {
+      commits(last: 100) {
+        nodes {
+          commit {
+            oid
+            abbreviatedOid
+            messageHeadline
+            committedDate
+            additions
+            deletions
+            author {
+              name
+              user { login }
+            }
+            statusCheckRollup {
+              state
+              contexts(last: 100) {
+                totalCount
+                nodes {
+                  ... on CheckRun { conclusion }
+                  ... on StatusContext { state }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}]], owner, repo, pr_number)
+
+  gh.run({ "api", "graphql", "-f", "query=" .. query }, function(data, err)
+    if err then
+      vim.notify("plz: commits: " .. err, vim.log.levels.WARN)
+      state.commits = {}
+      callback()
+      return
+    end
+    local nodes = (((data or {}).data or {}).repository or {}).pullRequest
+    nodes = nodes and nodes.commits and nodes.commits.nodes or {}
+    local commits = {}
+    for _, node in ipairs(nodes) do
+      local c = node.commit
+      if c then
+        local succeeded = 0
+        local total = 0
+        local check_state = nil
+        if c.statusCheckRollup and type(c.statusCheckRollup) == "table" then
+          check_state = c.statusCheckRollup.state
+          if type(check_state) ~= "string" then check_state = nil end
+          local ctx = c.statusCheckRollup.contexts
+          if type(ctx) == "table" then
+            total = type(ctx.totalCount) == "number" and ctx.totalCount or 0
+            for _, n in ipairs(type(ctx.nodes) == "table" and ctx.nodes or {}) do
+              if type(n) == "table" and (n.conclusion == "SUCCESS" or n.state == "SUCCESS") then
+                succeeded = succeeded + 1
+              end
+            end
+          end
+        end
+        table.insert(commits, {
+          oid = c.oid or "",
+          short_oid = c.abbreviatedOid or "",
+          message = c.messageHeadline or "",
+          date = c.committedDate or "",
+          author = (c.author and c.author.user and c.author.user.login)
+            or (c.author and c.author.name) or "",
+          additions = type(c.additions) == "number" and c.additions or 0,
+          deletions = type(c.deletions) == "number" and c.deletions or 0,
+          check_state = check_state,
+          checks_passed = succeeded,
+          checks_total = total,
+        })
+      end
+    end
+    -- Reverse so newest commit is first
+    local reversed = {}
+    for i = #commits, 1, -1 do reversed[#reversed + 1] = commits[i] end
+    state.commits = reversed
+    callback()
+  end)
+end
+
+--- Cycle to the next summary view and re-render.
+local SUMMARY_VIEWS = { "info", "commits", "description" }
+function M._cycle_summary_view()
+  for i, v in ipairs(SUMMARY_VIEWS) do
+    if v == state.summary_view then
+      state.summary_view = SUMMARY_VIEWS[i % #SUMMARY_VIEWS + 1]
+      break
+    end
+  end
+  M._render_summary_view()
+end
+
+--- Render the current summary view and resize the panel.
+function M._render_summary_view()
+  if state.summary_win and vim.api.nvim_win_is_valid(state.summary_win) then
+    if state.summary_view == "commits" then
+      vim.wo[state.summary_win].cursorline = true
+    else
+      vim.wo[state.summary_win].cursorline = false
+      vim.wo[state.summary_win].winbar = nil
+    end
+  end
+
+  if state.summary_view == "commits" then
+    M._render_commits()
+  elseif state.summary_view == "description" then
+    M._render_description()
+  else
+    M._render_summary()
+  end
+  -- Pad to exactly SUMMARY_LINES and enforce fixed height
+  if state.summary_buf and vim.api.nvim_buf_is_valid(state.summary_buf) then
+    local line_count = vim.api.nvim_buf_line_count(state.summary_buf)
+    if line_count < SUMMARY_LINES then
+      vim.bo[state.summary_buf].modifiable = true
+      local pad = {}
+      for _ = 1, SUMMARY_LINES - line_count do table.insert(pad, "") end
+      vim.api.nvim_buf_set_lines(state.summary_buf, -1, -1, false, pad)
+      vim.bo[state.summary_buf].modifiable = false
+    end
+  end
+  if state.summary_win and vim.api.nvim_win_is_valid(state.summary_win) then
+    vim.api.nvim_win_set_height(state.summary_win, SUMMARY_LINES)
+  end
+end
+
+--- Render the commits view in the summary buffer.
+function M._render_commits()
+  local render = require("plz.dashboard.render")
+  local commits = state.commits or {}
+  local lines = {}
+  local hl_regions = {}
+
+  -- Fixed column widths
+  local sha_w     = 12
+  local author_w  = 24
+  local lines_w   = 14
+  local time_w    = 6
+  local ci_w      = 10
+
+  local has_checks = false
+  for _, c in ipairs(commits) do
+    if c.checks_total > 0 then has_checks = true; break end
+  end
+
+  local win_w = state.summary_win and vim.api.nvim_win_is_valid(state.summary_win)
+    and vim.api.nvim_win_get_width(state.summary_win) or 90
+
+  --- Pad or truncate a string to exactly `w` display columns.
+  local function fit(s, w)
+    local dw = vim.fn.strdisplaywidth(s)
+    if dw > w then
+      return vim.fn.strcharpart(s, 0, w - 1) .. "…"
+    end
+    return s .. string.rep(" ", w - dw)
+  end
+
+  -- Column order: SHA, Author, +/-, Age, [Checks], Message
+  -- Header row with icon labels
+  local left_fixed = sha_w + author_w + lines_w + time_w + (has_checks and ci_w or 0)
+  local msg_w = math.max(10, win_w - 2 - left_fixed)
+
+  -- Build sticky header via winbar (statusline format)
+  local count_str = #commits .. " cmts"
+  local count_col = fit(count_str, sha_w):gsub("%%", "%%%%")
+  local rest = fit(icons.person or "", author_w)
+    .. fit(icons.lines or "", lines_w)
+    .. fit(icons.updated or "", time_w)
+  if has_checks then
+    rest = rest .. fit(icons.ci or "", ci_w)
+  end
+  rest = rest .. (icons.commit or "")
+  local winbar = "%#PlzAccent#  " .. count_col .. "%#PlzHeader#" .. rest:gsub("%%", "%%%%")
+  if state.summary_win and vim.api.nvim_win_is_valid(state.summary_win) then
+    vim.wo[state.summary_win].winbar = winbar
+  end
+
+  if #commits == 0 then
+    table.insert(lines, "  Loading…")
+    table.insert(hl_regions, { { 2, 12, "PlzFaint" } })
+  end
+
+  for _, c in ipairs(commits) do
+    local time_ago = render._relative_time(c.date)
+
+    local sha_col    = fit(c.short_oid, sha_w)
+    local author_col = fit("@" .. c.author, author_w)
+    local add_str = "+" .. render._format_number(c.additions)
+    local del_str = "-" .. render._format_number(c.deletions)
+    local lines_col  = fit(add_str .. " " .. del_str, lines_w)
+    local time_col   = fit(time_ago, time_w)
+
+    local ci_col = ""
+    local ci_icon_str = ""
+    if has_checks then
+      if c.checks_total > 0 then
+        if c.check_state == "SUCCESS" then
+          ci_icon_str = icons.ci_pass
+        elseif c.check_state == "FAILURE" or c.check_state == "ERROR" then
+          ci_icon_str = icons.ci_fail
+        else
+          ci_icon_str = icons.ci_wait
+        end
+        ci_col = fit(ci_icon_str .. " " .. c.checks_passed .. "/" .. c.checks_total, ci_w)
+      else
+        ci_col = fit("", ci_w)
+      end
+    end
+
+    local msg = c.message
+    if vim.fn.strdisplaywidth(msg) > msg_w then
+      msg = vim.fn.strcharpart(msg, 0, msg_w - 1) .. "…"
+    end
+
+    local line = "  " .. sha_col .. author_col .. lines_col .. time_col .. ci_col .. msg
+
+    table.insert(lines, line)
+
+    -- Highlights
+    local regions = {}
+    -- Left columns (SHA, author): faint
+    local faint1_end = 2 + #sha_col + #author_col
+    table.insert(regions, { 2, faint1_end, "PlzFaint" })
+    -- +/- with color
+    local add_start = faint1_end
+    local add_end = add_start + #add_str
+    table.insert(regions, { add_start, add_end, "PlzDiffAdd" })
+    local del_start = add_end + 1
+    local del_end = del_start + #del_str
+    table.insert(regions, { del_start, del_end, "PlzDiffRemove" })
+    -- Rest of lines_col + time + ci: faint
+    local left_end = faint1_end + #lines_col + #time_col + #ci_col
+    table.insert(regions, { del_end, left_end, "PlzFaint" })
+    -- CI icon color override
+    if has_checks and c.checks_total > 0 and ci_icon_str ~= "" then
+      local ci_pos = line:find(ci_icon_str, 2, true)
+      if ci_pos then
+        local ci_hl = c.check_state == "SUCCESS" and "PlzSuccess"
+          or (c.check_state == "FAILURE" or c.check_state == "ERROR") and "PlzError"
+          or "PlzWarning"
+        table.insert(regions, { ci_pos - 1, ci_pos - 1 + #ci_icon_str, ci_hl })
+      end
+    end
+
+    table.insert(hl_regions, regions)
+  end
+
+  vim.bo[state.summary_buf].modifiable = true
+  vim.api.nvim_buf_set_lines(state.summary_buf, 0, -1, false, lines)
+  vim.bo[state.summary_buf].modifiable = false
+
+  vim.api.nvim_buf_clear_namespace(state.summary_buf, ns, 0, -1)
+  for i, regions in ipairs(hl_regions) do
+    for _, r in ipairs(regions) do
+      if r[1] < r[2] and r[1] < #lines[i] then
+        pcall(vim.api.nvim_buf_set_extmark, state.summary_buf, ns, i - 1, r[1], {
+          end_col = math.min(r[2], #lines[i]),
+          hl_group = r[3],
+        })
+      end
+    end
+  end
+end
+
+--- Render the description view in the summary buffer.
+function M._render_description()
+  local pr = state.pr
+  local body = pr.body or ""
+  local lines = {}
+  local hl_regions = {}
+
+  -- Header
+  table.insert(lines, "  Description")
+  table.insert(hl_regions, { { 0, 13, "PlzAccent" } })
+  table.insert(lines, "")
+  table.insert(hl_regions, {})
+
+  if body == "" then
+    table.insert(lines, "  No description provided.")
+    table.insert(hl_regions, { { 2, 28, "PlzFaint" } })
+  else
+    for _, l in ipairs(vim.split(body, "\n", { plain = true })) do
+      table.insert(lines, "  " .. l)
+      table.insert(hl_regions, {})
+    end
+  end
+
+  vim.bo[state.summary_buf].modifiable = true
+  vim.api.nvim_buf_set_lines(state.summary_buf, 0, -1, false, lines)
+  vim.bo[state.summary_buf].modifiable = false
+
+  vim.api.nvim_buf_clear_namespace(state.summary_buf, ns, 0, -1)
+  for i, regions in ipairs(hl_regions) do
+    for _, r in ipairs(regions) do
+      if r[1] < r[2] and r[1] < #lines[i] then
+        pcall(vim.api.nvim_buf_set_extmark, state.summary_buf, ns, i - 1, r[1], {
+          end_col = math.min(r[2], #lines[i]),
+          hl_group = r[3],
+        })
+      end
+    end
+  end
+end
+
+--- Enter commit detail mode: show files changed in a single commit.
+function M._enter_commit_mode(commit)
+  local owner, repo = (state.pr.url or ""):match("github%.com/([^/]+)/([^/]+)")
+  if not owner then return end
+
+  -- Close any open diff
+  if state.diff_lhs_win and vim.api.nvim_win_is_valid(state.diff_lhs_win) then
+    M._close_diff()
+  end
+
+  -- Stash full PR files on first entry
+  if not state.commit_mode then
+    state.pr_files = state.files
+  end
+
+  state.commit_mode = true
+  state.commit_sha = commit.oid
+
+  vim.notify("plz: loading commit " .. commit.short_oid .. "…", vim.log.levels.INFO)
+
+  gh.run({
+    "api", string.format("repos/%s/%s/commits/%s", owner, repo, commit.oid),
+  }, function(data, err)
+    if err then
+      vim.notify("plz: " .. err, vim.log.levels.ERROR)
+      return
+    end
+
+    local parents = data.parents or {}
+    state.commit_parent_sha = parents[1] and parents[1].sha or nil
+    state.files = data.files or {}
+    state.base_sha = state.commit_parent_sha
+    state.head_sha = commit.oid
+    state.current_file_idx = nil
+
+    M._render_files()
+    M._highlight_active_commit(commit)
+
+    -- Show commit info in file list winbar
+    if state.win and vim.api.nvim_win_is_valid(state.win) then
+      local short = commit.short_oid
+      local msg = commit.message
+      if #msg > 60 then msg = msg:sub(1, 59) .. "…" end
+      vim.wo[state.win].winbar = "%#PlzAccent#  " .. short .. "%#PlzFaint#  " .. msg:gsub("%%", "%%%%")
+    end
+
+    -- Focus file list
+    if state.win and vim.api.nvim_win_is_valid(state.win) then
+      vim.api.nvim_set_current_win(state.win)
+    end
+  end)
+end
+
+--- Exit commit detail mode, restore full PR file list.
+function M._exit_commit_mode()
+  if not state.commit_mode then return end
+
+  -- Close any open diff
+  if state.diff_lhs_win and vim.api.nvim_win_is_valid(state.diff_lhs_win) then
+    M._close_diff()
+  end
+
+  state.commit_mode = false
+  state.files = state.pr_files or {}
+  state.pr_files = nil
+  state.commit_sha = nil
+  state.commit_parent_sha = nil
+  state.base_sha = state.pr.baseRefOid
+  state.head_sha = state.pr.headRefOid
+  state.current_file_idx = nil
+
+  M._render_files()
+
+  -- Clear file list winbar
+  if state.win and vim.api.nvim_win_is_valid(state.win) then
+    vim.wo[state.win].winbar = nil
+  end
+
+  -- Clear active commit highlight
+  if state.summary_buf and vim.api.nvim_buf_is_valid(state.summary_buf) then
+    vim.api.nvim_buf_clear_namespace(state.summary_buf, ns_active, 0, -1)
+  end
+
+  -- Focus summary (commits view)
+  if state.summary_win and vim.api.nvim_win_is_valid(state.summary_win) then
+    vim.api.nvim_set_current_win(state.summary_win)
+  end
+end
+
+--- Highlight the active commit row in the commits view.
+function M._highlight_active_commit(commit)
+  if not state.summary_buf or not vim.api.nvim_buf_is_valid(state.summary_buf) then return end
+  vim.api.nvim_buf_clear_namespace(state.summary_buf, ns_active, 0, -1)
+  if state.commits then
+    for i, c in ipairs(state.commits) do
+      if c.oid == commit.oid then
+        pcall(vim.api.nvim_buf_set_extmark, state.summary_buf, ns_active, i - 1, 0, {
+          line_hl_group = "CursorLine",
+        })
+        break
+      end
+    end
   end
 end
 
@@ -341,16 +780,30 @@ function M._format_ado_line(item)
   local icon = is_bug and icons.ado_bug or icons.ado_story
   local icon_hl = is_bug and "PlzError" or "PlzSuccess"
 
-  local parts = { icon .. " AB#" .. item.id, item.state, item.assigned_to }
-  if item.tags and item.tags ~= "" then
-    table.insert(parts, item.tags)
-  end
+  local prefix = icon .. " AB#" .. item.id
+  local parts = { prefix, item.state, item.assigned_to }
   local line = "  " .. table.concat(parts, " · ")
-  local icon_len = #icon
   local regions = {
-    { 2, 2 + icon_len, icon_hl },
-    { 2 + icon_len, #line, "PlzFaint" },
+    { 2, 2 + #icon, icon_hl },
+    { 2 + #icon, #line, "PlzFaint" },
   }
+
+  -- Render tags as pills
+  if item.tags and item.tags ~= "" then
+    local tag_list = vim.split(item.tags, ";%s*")
+    for _, tag in ipairs(tag_list) do
+      local trimmed = vim.trim(tag)
+      if trimmed ~= "" then
+        local pill = " " .. trimmed .. " "
+        line = line .. "  " .. pill
+        local pill_start = #line - #pill
+        local pill_end = #line
+        table.insert(regions, { pill_start, pill_end, "PlzPill" })
+        table.insert(regions, { pill_start, pill_end, "PlzFaint" })
+      end
+    end
+  end
+
   return line, regions
 end
 
@@ -436,7 +889,7 @@ end
 
 --- Render both summary and file list.
 function M._render()
-  M._render_summary()
+  M._render_summary_view()
   M._render_files()
 end
 
@@ -471,22 +924,67 @@ function M._setup_keymaps()
   end, vim.tbl_extend("force", opts, { desc = "Open PR files in browser" }))
 
   vim.keymap.set("n", "q", function()
-    M.close()
-  end, vim.tbl_extend("force", opts, { desc = "Close review" }))
+    if state.commit_mode then
+      M._exit_commit_mode()
+    else
+      M.close()
+    end
+  end, vim.tbl_extend("force", opts, { desc = "Close review / exit commit mode" }))
 
+  vim.keymap.set("n", "<BS>", function()
+    if state.commit_mode then
+      M._exit_commit_mode()
+    end
+  end, vim.tbl_extend("force", opts, { desc = "Back to full PR view" }))
+
+  vim.keymap.set("n", "<Tab>", function()
+    M._cycle_summary_view()
+  end, vim.tbl_extend("force", opts, { desc = "Cycle summary view" }))
+
+  local help_lines = {
+    "plz review",
+    "",
+    "<Tab>     cycle summary: Info → Commits → Description",
+    "<CR>      open diff / select commit (in commits view)",
+    "j/k       navigate files",
+    "]f / [f   next/prev file (in diff view)",
+    "]h / [h   next/prev hunk (in diff view)",
+    "<BS>/q    back (commit mode → PR, diff → files, files → close)",
+    "o         open PR files in browser",
+    "?         toggle this help",
+  }
   vim.keymap.set("n", "?", function()
-    vim.notify(table.concat({
-      "plz review",
-      "",
-      "j/k       navigate files",
-      "<CR>      open file diff below",
-      "]f / [f   next/prev file (in diff view)",
-      "]h / [h   next/prev hunk (in diff view)",
-      "o         open PR files in browser",
-      "q         close (diff or review)",
-      "?         this help",
-    }, "\n"), vim.log.levels.INFO)
-  end, vim.tbl_extend("force", opts, { desc = "Show help" }))
+    require("plz.help").toggle(help_lines)
+  end, vim.tbl_extend("force", opts, { desc = "Toggle help" }))
+
+  -- Summary buffer keymaps
+  local s_opts = { buffer = state.summary_buf, nowait = true }
+  vim.keymap.set("n", "q", function()
+    if state.commit_mode then
+      M._exit_commit_mode()
+    else
+      M.close()
+    end
+  end, vim.tbl_extend("force", s_opts, { desc = "Close review / exit commit mode" }))
+
+  vim.keymap.set("n", "<BS>", function()
+    if state.commit_mode then
+      M._exit_commit_mode()
+    end
+  end, vim.tbl_extend("force", s_opts, { desc = "Back to full PR view" }))
+
+  vim.keymap.set("n", "<CR>", function()
+    if state.summary_view == "commits" and state.commits then
+      local row = vim.api.nvim_win_get_cursor(state.summary_win)[1]
+      if row >= 1 and row <= #state.commits then
+        M._enter_commit_mode(state.commits[row])
+      end
+    end
+  end, vim.tbl_extend("force", s_opts, { desc = "View commit files" }))
+
+  vim.keymap.set("n", "<Tab>", function()
+    M._cycle_summary_view()
+  end, vim.tbl_extend("force", s_opts, { desc = "Cycle summary view" }))
 end
 
 --- Create the split: summary + file list on top, diff area below.
@@ -500,11 +998,11 @@ function M._create_diff_split()
   vim.cmd("vsplit")
   state.diff_rhs_win = vim.api.nvim_get_current_win()
 
-  -- Calculate explicit heights for all three rows
+  -- Calculate explicit heights
   local total_h = vim.o.lines - vim.o.cmdheight - 2 -- tabline + statusline
   local seps = 2 -- statuslines between summary/files and files/diff
   local avail = total_h - SUMMARY_LINES - seps
-  local file_h = math.max(3, math.min(#state.files + 1, math.floor(avail * 0.25)))
+  local file_h = SUMMARY_LINES
   local diff_h = avail - file_h
 
   -- Size file list and fix it
@@ -610,8 +1108,41 @@ function M._populate_diff(data)
   -- File navigation and q keymap on diff buffers
   M._setup_diff_keymaps(diff_state)
 
+  -- Show file position in status bar
+  M._update_diff_status()
+
   -- Focus the RHS (new code) window
   vim.api.nvim_set_current_win(state.diff_rhs_win)
+end
+
+--- Update the file list winbar with file position and +/-.
+function M._update_diff_status()
+  if not state.current_file_idx then return end
+  if not state.win or not vim.api.nvim_win_is_valid(state.win) then return end
+  local file = state.files[state.current_file_idx]
+  if not file then return end
+
+  local path = file.filename or file.path or "?"
+  local pos = string.format("%d of %d", state.current_file_idx, #state.files)
+  local render = require("plz.dashboard.render")
+  local add_str = "+" .. render._format_number(file.additions or 0)
+  local del_str = "-" .. render._format_number(file.deletions or 0)
+
+  local bar = "%#PlzAccent#  " .. pos:gsub("%%", "%%%%")
+    .. "%#PlzFaint#  " .. path:gsub("%%", "%%%%")
+    .. "%="
+    .. "%#PlzDiffAdd#" .. add_str:gsub("%%", "%%%%")
+    .. "%#Normal# "
+    .. "%#PlzDiffRemove#" .. del_str:gsub("%%", "%%%%")
+    .. "%#Normal#  "
+  vim.wo[state.win].winbar = bar
+end
+
+--- Clear the file list winbar.
+function M._clear_diff_status()
+  if state.win and vim.api.nvim_win_is_valid(state.win) then
+    vim.wo[state.win].winbar = nil
+  end
 end
 
 --- Set up keymaps on diff buffers (file nav, q).
@@ -637,6 +1168,10 @@ function M._setup_diff_keymaps(diff_state)
       vim.keymap.set("n", "q", function()
         M._close_diff()
       end, { buffer = buf, desc = "Close diff" })
+
+      vim.keymap.set("n", "<Tab>", function()
+        M._cycle_summary_view()
+      end, { buffer = buf, desc = "Cycle summary view" })
     end
   end
 end
@@ -701,9 +1236,18 @@ function M._open_diff(file_idx)
   -- Update active file indicator
   M._highlight_active_file()
 
-  -- Move file list cursor to match
+  -- Move file list cursor to match and ensure no trailing blank lines
   if state.win and vim.api.nvim_win_is_valid(state.win) then
     pcall(vim.api.nvim_win_set_cursor, state.win, { file_idx, 0 })
+    vim.api.nvim_win_call(state.win, function()
+      local win_h = vim.api.nvim_win_get_height(state.win)
+      local total = #state.files
+      if total > 0 and total <= win_h then
+        vim.fn.winrestview({ topline = 1 })
+      elseif file_idx > total - win_h + 1 then
+        vim.fn.winrestview({ topline = math.max(1, total - win_h + 1) })
+      end
+    end)
   end
 
   -- Create temp files
@@ -776,10 +1320,15 @@ function M._open_diff(file_idx)
   end
 
   -- Fetch base version
-  M._git_show(state.base_sha, prev_path, function(content)
-    base_content = content
+  if state.base_sha then
+    M._git_show(state.base_sha, prev_path, function(content)
+      base_content = content
+      on_ready()
+    end)
+  else
+    base_content = ""
     on_ready()
-  end)
+  end
 
   -- Fetch head version
   M._git_show(state.head_sha, path, function(content)
@@ -810,6 +1359,9 @@ function M._close_diff()
   if state.diff_rhs_win and vim.api.nvim_win_is_valid(state.diff_rhs_win) then
     pcall(vim.api.nvim_win_close, state.diff_rhs_win, true)
   end
+
+  -- Clear file list statusline
+  M._clear_diff_status()
 
   state.diff_lhs_win = nil
   state.diff_rhs_win = nil
@@ -847,6 +1399,12 @@ function M.close()
   state.pr = nil
   state.current_file_idx = nil
   state.ado_item = nil
+  state.commits = nil
+  state.summary_view = "info"
+  state.commit_mode = false
+  state.commit_sha = nil
+  state.commit_parent_sha = nil
+  state.pr_files = nil
 end
 
 return M

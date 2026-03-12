@@ -250,22 +250,23 @@ function M._setup_keymaps()
     end
   end, vim.tbl_extend("force", opts, { desc = "Open PR review" }))
 
+  local help_lines = {
+    "plz dashboard",
+    "",
+    "j/k       navigate",
+    "<CR>      open PR for review",
+    "o         open in browser",
+    "r         refresh",
+    "/         edit filter",
+    "1-" .. #fetch.sections .. "       switch tab",
+    "<Tab>     next tab",
+    "<S-Tab>   previous tab",
+    "q         close",
+    "?         toggle this help",
+  }
   vim.keymap.set("n", "?", function()
-    vim.notify(table.concat({
-      "plz dashboard",
-      "",
-      "j/k       navigate",
-      "<CR>      open PR for review",
-      "o         open in browser",
-      "r         refresh",
-      "/         edit filter",
-      "1-" .. #fetch.sections .. "       switch tab",
-      "<Tab>     next tab",
-      "<S-Tab>   previous tab",
-      "q         close",
-      "?         this help",
-    }, "\n"), vim.log.levels.INFO)
-  end, vim.tbl_extend("force", opts, { desc = "Show help" }))
+    require("plz.help").toggle(help_lines)
+  end, vim.tbl_extend("force", opts, { desc = "Toggle help" }))
 end
 
 --- Get the active filter string for the current tab.
