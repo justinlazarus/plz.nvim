@@ -1,11 +1,13 @@
 local gh = require("plz.gh")
 local diff = require("plz.diff")
+local ado = require("plz.ado")
+local icons = require("plz.dashboard.render").icons
 
 local M = {}
 
 local ns = vim.api.nvim_create_namespace("plz_review")
 local ns_active = vim.api.nvim_create_namespace("plz_review_active")
-local SUMMARY_LINES = 3
+local SUMMARY_LINES = 5
 
 local state = {
   pr = nil,
@@ -24,6 +26,7 @@ local state = {
   diff_lhs_buf = nil,
   diff_rhs_buf = nil,
   current_file_idx = nil,
+  ado_item = nil,
 }
 
 --- Open review for a PR from the dashboard.
@@ -138,29 +141,80 @@ end
 --- Render the summary buffer (fixed header).
 function M._render_summary()
   local pr = state.pr
+  local render = require("plz.dashboard.render")
   local lines = {}
   local hl_regions = {}
 
+  -- Line 1: PR title
   local title_line = string.format("  PR #%d: %s", pr.number, pr.title or "")
   table.insert(lines, title_line)
+  local pr_num_str = "  PR #" .. tostring(pr.number)
   table.insert(hl_regions, {
-    { 0, #("  PR #" .. tostring(pr.number)), "PlzAccent" },
+    { 0, #pr_num_str, "PlzAccent" },
   })
 
-  local ref_line = string.format("  %s  %s  │  %d files changed",
-    pr.baseRefName or "?", pr.headRefName or "?", #state.files)
-  table.insert(lines, ref_line)
+  -- Line 2: Status pill + branches
+  local state_icon, state_hl, state_label
+  if pr.isDraft then
+    state_icon, state_hl, state_label = icons.draft, "PlzDraft", "Draft"
+  elseif (pr.state or "") == "MERGED" then
+    state_icon, state_hl, state_label = icons.merged, "PlzMerged", "Merged"
+  elseif (pr.state or "") == "CLOSED" then
+    state_icon, state_hl, state_label = icons.closed, "PlzClosed", "Closed"
+  else
+    state_icon, state_hl, state_label = icons.open, "PlzOpen", "Open"
+  end
+  local pill = string.format(" %s %s ", state_icon, state_label)
+  local branch_line = string.format("  %s  %s ← %s",
+    pill, pr.baseRefName or "?", pr.headRefName or "?")
+  table.insert(lines, branch_line)
+  local pill_start = 2
+  local pill_end = pill_start + #pill
   table.insert(hl_regions, {
-    { 0, #ref_line, "PlzFaint" },
+    { pill_start, pill_end, "PlzPill" },
+    { pill_start, pill_end, state_hl },
+    { pill_end, #branch_line, "PlzFaint" },
   })
 
-  local win_w = state.summary_win and vim.api.nvim_win_is_valid(state.summary_win)
-    and vim.api.nvim_win_get_width(state.summary_win) or 90
-  local border = string.rep("─", win_w)
-  table.insert(lines, border)
-  table.insert(hl_regions, {
-    { 0, #border, "PlzBorder" },
-  })
+  -- Line 3: Author + time + file count + additions/deletions
+  local author_name = (pr.author and (pr.author.name or pr.author.login)) or "?"
+  local time_ago = render._relative_time(pr.createdAt) .. " ago"
+  local total_adds, total_dels = 0, 0
+  for _, file in ipairs(state.files) do
+    total_adds = total_adds + (file.additions or 0)
+    total_dels = total_dels + (file.deletions or 0)
+  end
+  local stats = string.format("%d files", #state.files)
+  if total_adds > 0 then stats = stats .. string.format("  +%d", total_adds) end
+  if total_dels > 0 then stats = stats .. string.format("  -%d", total_dels) end
+  local meta_line = string.format("  by @%s · %s · %s", author_name, time_ago, stats)
+  table.insert(lines, meta_line)
+  -- Highlight: author bold, rest faint, +/- colored
+  local author_start = 2
+  local author_end = author_start + #("by @" .. author_name)
+  local meta_regions = {
+    { author_start, author_end, "Normal" },
+    { author_end, #meta_line, "PlzFaint" },
+  }
+  if total_adds > 0 then
+    local p = meta_line:find("+" .. tostring(total_adds))
+    if p then table.insert(meta_regions, { p - 1, p - 1 + #("+" .. tostring(total_adds)), "PlzGreen" }) end
+  end
+  if total_dels > 0 then
+    local p = meta_line:find("-" .. tostring(total_dels))
+    if p then table.insert(meta_regions, { p - 1, p - 1 + #("-" .. tostring(total_dels)), "PlzRed" }) end
+  end
+  table.insert(hl_regions, meta_regions)
+
+  -- Line 4: Reviewers
+  local reviewer_line, reviewer_regions = M._build_reviewer_line(pr)
+  table.insert(lines, reviewer_line)
+  table.insert(hl_regions, reviewer_regions)
+
+  -- Line 5: ADO work item
+  local ado_line, ado_regions = M._build_ado_line(pr)
+  table.insert(lines, ado_line)
+  table.insert(hl_regions, ado_regions)
 
   vim.bo[state.summary_buf].modifiable = true
   vim.api.nvim_buf_set_lines(state.summary_buf, 0, -1, false, lines)
@@ -177,6 +231,127 @@ function M._render_summary()
       end
     end
   end
+end
+
+--- Build the reviewer line with status icons.
+--- @param pr table PR data
+--- @return string line
+--- @return table[] hl_regions
+function M._build_reviewer_line(pr)
+  local parts = {}
+  local regions = {}
+  local pos = 2 -- start after "  "
+  local seen = {}
+
+  -- Completed reviews (latest per author)
+  local latest = {}
+  for _, review in ipairs(pr.reviews or {}) do
+    local login = review.author and review.author.login
+    if login then
+      latest[login] = review.state
+    end
+  end
+
+  for login, review_state in pairs(latest) do
+    seen[login] = true
+    local icon, hl
+    if review_state == "APPROVED" then
+      icon, hl = icons.approved, "PlzSuccess"
+    elseif review_state == "CHANGES_REQUESTED" then
+      icon, hl = icons.changes, "PlzError"
+    elseif review_state == "COMMENTED" then
+      icon, hl = icons.comment, "PlzFaint"
+    else
+      icon, hl = icons.waiting, "PlzWarning"
+    end
+
+    if #parts > 0 then
+      table.insert(parts, ", ")
+      pos = pos + 2
+    end
+    local entry = string.format("%s @%s", icon, login)
+    table.insert(parts, entry)
+    -- Icon highlight
+    local icon_len = #icon
+    table.insert(regions, { pos, pos + icon_len, hl })
+    pos = pos + #entry
+  end
+
+  -- Pending review requests (not yet reviewed)
+  for _, req in ipairs(pr.reviewRequests or {}) do
+    local login = (req.login) or (req.name) or (req.slug)
+    if login and not seen[login] then
+      seen[login] = true
+      if #parts > 0 then
+        table.insert(parts, ", ")
+        pos = pos + 2
+      end
+      local entry = string.format("%s @%s", icons.waiting, login)
+      table.insert(parts, entry)
+      local icon_len = #icons.waiting
+      table.insert(regions, { pos, pos + icon_len, "PlzWarning" })
+      pos = pos + #entry
+    end
+  end
+
+  local line = "  " .. table.concat(parts)
+  if #parts == 0 then
+    line = "  No reviewers"
+    regions = { { 2, #line, "PlzFaint" } }
+  end
+  return line, regions
+end
+
+--- Build the ADO work item line.
+--- @param pr table PR data
+--- @return string line
+--- @return table[] hl_regions
+function M._build_ado_line(pr)
+  local ab_id = ((pr.title or ""):match("AB#(%d+)") or (pr.body or ""):match("AB#(%d+)"))
+  if not ab_id then
+    local line = "  " .. icons.ado_none .. " No linked work item"
+    return line, { { 2, #line, "PlzFaint" } }
+  end
+
+  -- Check if we already have cached ADO data
+  if state.ado_item then
+    return M._format_ado_line(state.ado_item)
+  end
+
+  -- Kick off async fetch, show placeholder for now
+  local line = "  " .. icons.ado_none .. " AB#" .. ab_id .. " loading…"
+  ado.fetch_work_item(ab_id, function(item, err)
+    if item then
+      state.ado_item = item
+      -- Re-render summary with ADO data
+      if state.summary_buf and vim.api.nvim_buf_is_valid(state.summary_buf) then
+        M._render_summary()
+      end
+    end
+  end)
+  return line, { { 2, #line, "PlzFaint" } }
+end
+
+--- Format a resolved ADO work item line.
+--- @param item table ADO work item
+--- @return string line
+--- @return table[] hl_regions
+function M._format_ado_line(item)
+  local is_bug = item.type == "Bug"
+  local icon = is_bug and icons.ado_bug or icons.ado_story
+  local icon_hl = is_bug and "PlzError" or "PlzSuccess"
+
+  local parts = { icon .. " AB#" .. item.id, item.state, item.assigned_to }
+  if item.tags and item.tags ~= "" then
+    table.insert(parts, item.tags)
+  end
+  local line = "  " .. table.concat(parts, " · ")
+  local icon_len = #icon
+  local regions = {
+    { 2, 2 + icon_len, icon_hl },
+    { 2 + icon_len, #line, "PlzFaint" },
+  }
+  return line, regions
 end
 
 --- Render the file list buffer.
@@ -671,6 +846,7 @@ function M.close()
   state.files = {}
   state.pr = nil
   state.current_file_idx = nil
+  state.ado_item = nil
 end
 
 return M
