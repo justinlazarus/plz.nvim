@@ -35,6 +35,7 @@ local state = {
   diff_status_buf = nil,
   current_file_idx = nil,
   ado_item = nil,
+  viewed = {},  -- path -> bool, synced with GitHub viewed state
 }
 
 --- Open review for a PR from the dashboard.
@@ -84,6 +85,9 @@ function M.open(pr)
   M._fetch_commits(owner, repo, pr.number, function()
     try_show()
   end)
+
+  -- Fetch viewed states in background (updates file list when ready)
+  M._fetch_viewed_states(owner, repo, pr.number)
 end
 
 --- Ensure the PR commits are available locally.
@@ -245,6 +249,79 @@ query {
     for i = #commits, 1, -1 do reversed[#reversed + 1] = commits[i] end
     state.commits = reversed
     callback()
+  end)
+end
+
+--- Fetch viewed state for all PR files via GraphQL.
+--- @param owner string
+--- @param repo string
+--- @param pr_number number
+function M._fetch_viewed_states(owner, repo, pr_number)
+  local query = string.format([[
+query {
+  repository(owner: "%s", name: "%s") {
+    pullRequest(number: %d) {
+      files(first: 100) {
+        nodes {
+          path
+          viewerViewedState
+        }
+      }
+    }
+  }
+}]], owner, repo, pr_number)
+
+  gh.run({ "api", "graphql", "-f", "query=" .. query }, function(data, err)
+    if err then return end
+    local files = (((data or {}).data or {}).repository or {}).pullRequest
+    files = files and files.files and files.files.nodes or {}
+    for _, f in ipairs(files) do
+      if type(f) == "table" and f.path then
+        state.viewed[f.path] = (f.viewerViewedState == "VIEWED")
+      end
+    end
+    -- Re-render file list to show checkboxes
+    if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
+      M._render_files()
+      if state.current_file_idx then
+        M._highlight_active_file()
+        M._update_diff_status()
+      end
+    end
+  end)
+end
+
+--- Toggle viewed state for a file via GitHub GraphQL mutation.
+--- @param file_path string
+function M._toggle_viewed(file_path)
+  local pr = state.pr
+  if not pr or not pr.id then return end
+
+  local is_viewed = state.viewed[file_path]
+  local mutation_name = is_viewed and "unmarkFileAsViewed" or "markFileAsViewed"
+
+  local query = string.format([[
+mutation {
+  %s(input: { pullRequestId: "%s", path: "%s" }) {
+    clientMutationId
+  }
+}]], mutation_name, pr.id, file_path:gsub('"', '\\"'))
+
+  -- Optimistic update
+  state.viewed[file_path] = not is_viewed
+  M._render_files()
+  if state.current_file_idx then
+    M._highlight_active_file()
+    M._update_diff_status()
+  end
+
+  gh.run({ "api", "graphql", "-f", "query=" .. query }, function(_data, err)
+    if err then
+      -- Revert on failure
+      state.viewed[file_path] = is_viewed
+      M._render_files()
+      vim.notify("plz: failed to update viewed state", vim.log.levels.WARN)
+    end
   end)
 end
 
@@ -828,6 +905,10 @@ function M._render_files()
     local adds = file.additions or 0
     local dels = file.deletions or 0
 
+    local viewed = state.viewed[path]
+    local check = viewed and icons.ci_pass or "○"
+    local check_hl = viewed and "PlzSuccess" or "PlzFaint"
+
     local icon, icon_hl
     if status == "added" then
       icon, icon_hl = "A", "PlzGreen"
@@ -850,19 +931,20 @@ function M._render_files()
     local dels_str = dels > 0 and ("-" .. dels) or ""
 
     local padded_path = display_path .. string.rep(" ", max_path - vim.fn.strdisplaywidth(display_path))
-    local row = string.format("  %s  %s  %7s %7s", icon, padded_path, adds_str, dels_str):gsub("%s+$", "")
+    local row = string.format("  %s %s  %s  %7s %7s", check, icon, padded_path, adds_str, dels_str):gsub("%s+$", "")
     table.insert(lines, row)
 
     local row_regions = {}
-    table.insert(row_regions, { 2, 3, icon_hl })
+    table.insert(row_regions, { 2, 2 + #check, check_hl })
+    table.insert(row_regions, { 2 + #check + 1, 2 + #check + 2, icon_hl })
     if adds > 0 then
-      local p = row:find("+" .. tostring(adds), 5 + #display_path)
+      local p = row:find("+" .. tostring(adds), 7 + #display_path)
       if p then
         table.insert(row_regions, { p - 1, p - 1 + #adds_str, "PlzGreen" })
       end
     end
     if dels > 0 then
-      local p = row:find("-" .. tostring(dels), 5 + #display_path)
+      local p = row:find("-" .. tostring(dels), 7 + #display_path)
       if p then
         table.insert(row_regions, { p - 1, p - 1 + #dels_str, "PlzRed" })
       end
@@ -941,12 +1023,21 @@ function M._setup_keymaps()
     M._cycle_summary_view()
   end, vim.tbl_extend("force", opts, { desc = "Cycle summary view" }))
 
+  vim.keymap.set("n", "v", function()
+    local idx = vim.api.nvim_win_get_cursor(state.win)[1]
+    local file = state.files[idx]
+    if file then
+      M._toggle_viewed(file.filename or file.path)
+    end
+  end, vim.tbl_extend("force", opts, { desc = "Toggle viewed" }))
+
   local help_lines = {
     "plz review",
     "",
     "<Tab>     cycle summary: Info → Commits → Description",
     "<CR>      open diff / select commit (in commits view)",
     "j/k       navigate files",
+    "v         toggle file viewed",
     "]f / [f   next/prev file (in diff view)",
     "]h / [h   next/prev hunk (in diff view)",
     "<BS>/q    back (commit mode → PR, diff → files, files → close)",
@@ -1108,10 +1199,37 @@ function M._populate_diff(data)
   -- File navigation and q keymap on diff buffers
   M._setup_diff_keymaps(diff_state)
 
+  -- Show file position
+  M._update_diff_status()
+
   -- Focus the RHS (new code) window
   vim.api.nvim_set_current_win(state.diff_rhs_win)
 end
 
+--- Update the file list winbar with file position and viewed checkbox.
+function M._update_diff_status()
+  if not state.current_file_idx then return end
+  if not state.win or not vim.api.nvim_win_is_valid(state.win) then return end
+  local file = state.files[state.current_file_idx]
+  if not file then return end
+
+  local path = file.filename or file.path or "?"
+  local viewed = state.viewed[path]
+  local check_icon = viewed and icons.ci_pass or "○"
+  local check_hl = viewed and "PlzSuccess" or "PlzFaint"
+
+  local pos = string.format("%d of %d", state.current_file_idx, #state.files)
+  local bar = "%#PlzAccent#  " .. pos:gsub("%%", "%%%%")
+    .. "  %#" .. check_hl .. "#" .. check_icon
+  vim.wo[state.win].winbar = bar
+end
+
+--- Clear the file list winbar.
+function M._clear_diff_status()
+  if state.win and vim.api.nvim_win_is_valid(state.win) then
+    vim.wo[state.win].winbar = nil
+  end
+end
 
 --- Set up keymaps on diff buffers (file nav, q).
 function M._setup_diff_keymaps(diff_state)
@@ -1136,6 +1254,15 @@ function M._setup_diff_keymaps(diff_state)
       vim.keymap.set("n", "q", function()
         M._close_diff()
       end, { buffer = buf, desc = "Close diff" })
+
+      vim.keymap.set("n", "v", function()
+        if state.current_file_idx then
+          local file = state.files[state.current_file_idx]
+          if file then
+            M._toggle_viewed(file.filename or file.path)
+          end
+        end
+      end, { buffer = buf, desc = "Toggle viewed" })
 
       vim.keymap.set("n", "<Tab>", function()
         M._cycle_summary_view()
@@ -1328,6 +1455,7 @@ function M._close_diff()
     pcall(vim.api.nvim_win_close, state.diff_rhs_win, true)
   end
 
+  M._clear_diff_status()
 
 
   state.diff_lhs_win = nil
@@ -1363,6 +1491,7 @@ function M.close()
   state.buf = nil
   state.win = nil
   state.files = {}
+  state.viewed = {}
   state.pr = nil
   state.current_file_idx = nil
   state.ado_item = nil

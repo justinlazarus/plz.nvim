@@ -1,0 +1,210 @@
+*plz.txt*    PR review workflow for Neovim
+
+Author: Justin Lazarus
+License: MIT
+Repository: https://github.com/justinlazarus/plz.nvim
+
+==============================================================================
+CONTENTS                                                        *plz-contents*
+
+    1. Introduction ............................ |plz-introduction|
+    2. Requirements ............................ |plz-requirements|
+    3. Installation ............................ |plz-installation|
+    4. Configuration ........................... |plz-configuration|
+    5. Commands ................................ |plz-commands|
+    6. Dashboard ............................... |plz-dashboard|
+    7. Review .................................. |plz-review|
+    8. Diff .................................... |plz-diff|
+    9. Highlights .............................. |plz-highlights|
+
+==============================================================================
+1. INTRODUCTION                                             *plz-introduction*
+
+plz.nvim is a unified PR review workflow for Neovim. It replaces gh-dash +
+octo.nvim with a single plugin that provides:
+
+- A gh-dash style dashboard for PR triage
+- Difftastic-powered structural diffs (syntax-aware, token-level)
+- File-centric review with inline threads
+- Azure DevOps work item integration
+
+Zero plugin dependencies. Dashboard → diff → review → submit, all without
+leaving Neovim.
+
+==============================================================================
+2. REQUIREMENTS                                             *plz-requirements*
+
+Required: ~
+- Neovim >= 0.10
+- `gh` CLI, authenticated (`gh auth login`)
+- `difft` (difftastic) for structural diffs
+
+Optional: ~
+- `wt` (worktrunk) for worktree-based file exploration with LSP
+- `ADO_PAT` environment variable for Azure DevOps work item integration
+
+==============================================================================
+3. INSTALLATION                                             *plz-installation*
+
+With vim.pack: ~
+>lua
+    require('vim.pack').add('justinlazarus/plz.nvim')
+<
+
+With lazy.nvim: ~
+>lua
+    { 'justinlazarus/plz.nvim' }
+<
+
+Manual (git clone): ~
+>bash
+    git clone https://github.com/justinlazarus/plz.nvim.git \
+      ~/.local/share/nvim/site/pack/plugins/start/plz.nvim
+<
+
+==============================================================================
+4. CONFIGURATION                                           *plz-configuration*
+
+Call `setup()` with an optional table. All values shown are defaults: >lua
+
+    require('plz').setup({
+      diff = {
+        layout = "side-by-side",  -- diff layout
+        context = 3,              -- context lines around changes
+      },
+      worktree = {
+        auto_create = true,       -- create worktree on review open
+        auto_cleanup = true,      -- remove worktree on review close
+      },
+      -- Azure DevOps integration (optional)
+      ado = {
+        org = "",                 -- ADO organization
+        project = "",             -- ADO project
+        pat_env = "ADO_PAT",     -- env var containing the PAT
+      },
+    })
+<
+The plugin works without calling `setup()`. Defaults are applied
+automatically.
+
+==============================================================================
+5. COMMANDS                                                     *plz-commands*
+
+                                                                        *:Plz*
+:Plz                    Open the plz dashboard.
+
+                                                                    *:PlzDiff*
+:PlzDiff {old} {new}    Open a difftastic side-by-side diff of two local
+                        files. Useful for comparing any two files outside
+                        of a PR context.
+
+==============================================================================
+6. DASHBOARD                                                   *plz-dashboard*
+
+The dashboard (`:Plz`) shows your PRs in a tabbed table view with a
+preview pane, similar to gh-dash.
+
+Sections: ~
+  Tab 1 - Review Requested
+  Tab 2 - My PRs
+  Tab 3 - All Open
+
+Dashboard keybindings: ~
+
+    Key             Action ~
+    `j` / `k`         Navigate rows
+    `<CR>`            Open PR for review
+    `o`               Open PR in browser
+    `r`               Refresh
+    `1` - `3`           Switch tab
+    `<Tab>`           Next tab
+    `<S-Tab>`         Previous tab
+    `/`               Edit filter
+    `q`               Close dashboard
+    `?`               Toggle help popup
+
+==============================================================================
+7. REVIEW                                                       *plz-review*
+
+Pressing `<CR>` on a PR in the dashboard opens the review view with a
+file list, summary pane, and side-by-side diff.
+
+The summary pane cycles through three views with `<Tab>`:
+  Info → Commits → Description
+
+Review keybindings: ~
+
+    Key             Action ~
+    `j` / `k`         Navigate files
+    `<CR>`            Open diff / select commit
+    `<Tab>`           Cycle summary view
+    `]f` / `[f`       Next / previous file (in diff)
+    `]h` / `[h`       Next / previous hunk (in diff)
+    `o`               Open PR files in browser
+    `<BS>` / `q`      Back (commit → PR, diff → files, files → close)
+    `?`               Toggle help popup
+
+Commit mode: ~
+When viewing the Commits summary, press `<CR>` on a commit to enter
+commit mode. This shows only files changed in that commit with diffs
+scoped to that single commit. Press `<BS>` or `q` to return to the
+full PR view.
+
+==============================================================================
+8. DIFF                                                           *plz-diff*
+
+Diffs are powered by difftastic, providing syntax-aware structural diffs
+with token-level highlighting. Changed tokens are highlighted individually
+rather than entire lines.
+
+The diff view shows two side-by-side buffers (base and head) with
+scroll sync enabled.
+
+Navigation: ~
+    `]h` / `[h`       Next / previous hunk
+    `]f` / `[f`       Next / previous file
+
+==============================================================================
+9. HIGHLIGHTS                                               *plz-highlights*
+
+All highlight groups use `default = true`, so your colorscheme takes
+precedence. Override any `Plz*` group in your config.
+
+Diff highlights: ~
+
+    Group                 Default               Used for ~
+    `PlzDiffAdd`            fg=#a6e3a1 bold       Novel tokens (head)
+    `PlzDiffRemove`         fg=#f38ba8 bold       Novel tokens (base)
+    `PlzDiffAddLine`        fg=#6e9670            Changed line (head)
+    `PlzDiffRemoveLine`     fg=#9e6a74            Changed line (base)
+
+Dashboard highlights: ~
+
+    Group                 Default               Used for ~
+    `PlzOpen`               fg=#42A0FA            Open PR state
+    `PlzDraft`              fg=#656C76            Draft PR state
+    `PlzMerged`             fg=#A371F7            Merged PR state
+    `PlzSuccess`            fg=#3DF294            CI passed
+    `PlzWarning`            fg=#E5C07B            CI running
+    `PlzError`              fg=#E06C75            CI failed
+    `PlzFaint`              fg=#656C76            Dimmed text
+    `PlzAccent`             fg=#42A0FA            Accent color
+    `PlzBorder`             fg=#3E4452            Border lines
+    `PlzTabActive`          fg=#ABB2BF bold       Active tab
+    `PlzTabInactive`        fg=#656C76            Inactive tab
+
+Linked highlights: ~
+
+    Group                 Links to ~
+    `PlzThread`             Comment
+    `PlzThreadResolved`     NonText
+    `PlzThreadOutdated`     DiagnosticWarn
+    `PlzCommentPending`     DiagnosticInfo
+    `PlzGutterMark`         DiagnosticHint
+    `PlzCIPass`             PlzSuccess
+    `PlzCIFail`             PlzError
+    `PlzCIPending`          PlzWarning
+    `PlzSectionTitle`       Title
+
+==============================================================================
+ vim:tw=78:ts=8:ft=help:norl:
