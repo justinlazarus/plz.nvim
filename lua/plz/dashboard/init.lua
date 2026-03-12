@@ -21,6 +21,8 @@ local state = {
   editing_filter = false,
   filter_buf = nil, -- 1-line scratch buffer for filter editing
   fetch_gen = 0, -- generation counter to ignore stale fetch callbacks
+  current_limit = nil, -- current fetch limit (for load-more)
+  has_more = false, -- true when result count == limit (more may exist)
 }
 
 --- Compute column layout for the current window width.
@@ -125,29 +127,9 @@ function M.open()
   M._fetch_tab(state.tab_idx)
 end
 
---- Fetch and display PRs for the given tab.
+--- Fetch and display PRs for the given tab, respecting any filter override.
 function M._fetch_tab(idx)
-  state.tab_idx = idx
-  state.prs = {}
-
-  -- Write/update the header (updates active tab highlight)
-  M._write_header()
-
-  -- Replace body (lines below header) with "Loading..."
-  set_buf_lines_from(state.list_buf, HEADER_LINES, { "", "  Loading..." })
-
-  state.fetch_gen = state.fetch_gen + 1
-  local gen = state.fetch_gen
-  fetch.fetch_section(idx, function(prs, err)
-    if gen ~= state.fetch_gen then return end -- stale callback
-    if err then
-      set_buf_lines_from(state.list_buf, HEADER_LINES, { "", "  Error: " .. err })
-      return
-    end
-    state.prs = prs or {}
-    M._render_rows()
-    M._fetch_ado_batch()
-  end)
+  M._fetch_tab_with_filter(idx)
 end
 
 --- Batch-fetch ADO work items for all PRs that have AB# references.
@@ -186,6 +168,13 @@ function M._render_rows()
       local row_text, row_regions = render.format_row(pr, cols, ado_item)
       table.insert(lines, row_text)
       table.insert(all_regions, row_regions)
+    end
+    if state.has_more then
+      local more = "  ── Load more (L) ──"
+      table.insert(lines, "")
+      table.insert(all_regions, {})
+      table.insert(lines, more)
+      table.insert(all_regions, { { 0, #more, "PlzFaint" } })
     end
   end
 
@@ -234,6 +223,13 @@ function M._setup_keymaps()
     M._fetch_tab(state.tab_idx)
   end, vim.tbl_extend("force", opts, { desc = "Refresh" }))
 
+  vim.keymap.set("n", "L", function()
+    if state.has_more then
+      local new_limit = state.current_limit + fetch.PAGE_SIZE
+      M._fetch_tab_with_filter(state.tab_idx, new_limit)
+    end
+  end, vim.tbl_extend("force", opts, { desc = "Load more" }))
+
   vim.keymap.set("n", "/", function()
     M._edit_filter()
   end, vim.tbl_extend("force", opts, { desc = "Edit filter" }))
@@ -257,6 +253,7 @@ function M._setup_keymaps()
     "<CR>      open PR for review",
     "o         open in browser",
     "r         refresh",
+    "L         load more",
     "/         edit filter",
     "1-" .. #fetch.sections .. "       switch tab",
     "<Tab>     next tab",
@@ -336,17 +333,31 @@ function M._edit_filter()
 end
 
 --- Fetch using the current (possibly overridden) filter.
-function M._fetch_tab_with_filter(idx)
+--- @param idx number Tab index
+--- @param limit? number Override fetch limit (for load-more)
+function M._fetch_tab_with_filter(idx, limit)
   state.tab_idx = idx
-  state.prs = {}
+  state.current_limit = limit or fetch.PAGE_SIZE
+  state.has_more = false
 
-  M._write_header()
-  set_buf_lines_from(state.list_buf, HEADER_LINES, { "", "  Loading..." })
+  if limit then
+    -- Load-more: replace the "Load more" footer with loading indicator, keep existing rows
+    local total = vim.api.nvim_buf_line_count(state.list_buf)
+    if total > HEADER_LINES + #state.prs then
+      vim.bo[state.list_buf].modifiable = true
+      vim.api.nvim_buf_set_lines(state.list_buf, HEADER_LINES + #state.prs, -1, false, { "", "  Loading more..." })
+      vim.bo[state.list_buf].modifiable = false
+    end
+  else
+    state.prs = {}
+    M._write_header()
+    set_buf_lines_from(state.list_buf, HEADER_LINES, { "", "  Loading..." })
+  end
 
   state.fetch_gen = state.fetch_gen + 1
   local gen = state.fetch_gen
   local filter = M._get_filter()
-  local args = fetch.args_from_filter(filter)
+  local args = fetch.args_from_filter(filter, state.current_limit)
   local gh = require("plz.gh")
   gh.run(args, function(prs, err)
     if gen ~= state.fetch_gen then return end -- stale callback
@@ -355,6 +366,7 @@ function M._fetch_tab_with_filter(idx)
       return
     end
     state.prs = prs or {}
+    state.has_more = #state.prs >= state.current_limit
     M._render_rows()
     M._fetch_ado_batch()
   end)
