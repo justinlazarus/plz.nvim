@@ -1,5 +1,7 @@
--- Ensure highlights are set up even without explicit setup() call
-require("plz").setup()
+-- Set up highlights if setup() hasn't been called yet
+if not require("plz")._did_setup then
+  require("plz").setup()
+end
 
 vim.api.nvim_create_user_command("PlzDiff", function(args)
   local fargs = args.fargs

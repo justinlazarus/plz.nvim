@@ -1,5 +1,6 @@
 local fetch = require("plz.dashboard.fetch")
 local render = require("plz.dashboard.render")
+local ado = require("plz.ado")
 
 local M = {}
 
@@ -16,22 +17,83 @@ local state = {
   list_win = nil,
   preview_win = nil,
   autocmd_id = nil,
+  ado_cache = {}, -- keyed by work item ID
+  prev_buf = nil, -- buffer to restore on close
 }
 
 --- Compute title column width based on window width.
-local function title_width()
-  if not state.list_win or not vim.api.nvim_win_is_valid(state.list_win) then
-    return 40
+--- Compute column layout for the current window width.
+local function get_cols()
+  local win_w = 90
+  if state.list_win and vim.api.nvim_win_is_valid(state.list_win) then
+    win_w = vim.api.nvim_win_get_width(state.list_win)
   end
-  local win_w = vim.api.nvim_win_get_width(state.list_win)
-  -- Reserve space for: state(3) + number(7) + author(22) + review(4) + ci(3) + lines(13) + age(6) + padding(~5)
-  local reserved = 3 + 7 + 22 + 4 + 3 + 13 + 6 + 5
-  return math.max(20, win_w - reserved)
+  return render.compute_columns(win_w)
+end
+
+--- Helper to set buffer lines (full replace).
+local function set_buf_lines(buf, lines)
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
+  vim.bo[buf].modifiable = true
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+end
+
+--- Helper to replace lines from `start_row` (0-indexed) onwards.
+local function set_buf_lines_from(buf, start_row, lines)
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
+  vim.bo[buf].modifiable = true
+  vim.api.nvim_buf_set_lines(buf, start_row, -1, false, lines)
+  vim.bo[buf].modifiable = false
+end
+
+--- Render the header into the buffer (tab bar + borders + column headers).
+--- Only called once on open and when tab changes (to update active tab highlight).
+function M._write_header()
+  if not state.list_buf or not vim.api.nvim_buf_is_valid(state.list_buf) then return end
+
+  local cols = get_cols()
+  local lines = {}
+  local all_regions = {}
+
+  local tab_text, tab_regions = render.tab_line(fetch.sections, state.tab_idx)
+  lines[1] = tab_text
+  all_regions[1] = tab_regions
+
+  local win_w = state.list_win and vim.api.nvim_win_is_valid(state.list_win)
+    and vim.api.nvim_win_get_width(state.list_win) or 90
+  lines[2] = string.rep("─", win_w)
+  all_regions[2] = { { 0, #lines[2], "PlzBorder" } }
+
+  local header_text, header_regions = render.header_line(cols)
+  lines[3] = header_text
+  all_regions[3] = header_regions
+
+  lines[4] = string.rep("─", win_w)
+  all_regions[4] = { { 0, #lines[4], "PlzBorder" } }
+
+  -- Replace only the first 4 lines
+  vim.bo[state.list_buf].modifiable = true
+  local total = vim.api.nvim_buf_line_count(state.list_buf)
+  if total < HEADER_LINES then
+    -- Buffer is fresh/empty — write header + empty body
+    vim.api.nvim_buf_set_lines(state.list_buf, 0, -1, false, lines)
+  else
+    -- Only replace header lines, keep body intact
+    vim.api.nvim_buf_set_lines(state.list_buf, 0, HEADER_LINES, false, lines)
+  end
+  vim.bo[state.list_buf].modifiable = false
+
+  -- Apply header highlights
+  render.clear(state.list_buf)
+  for i, regions in ipairs(all_regions) do
+    render.apply_regions(state.list_buf, i - 1, regions)
+  end
 end
 
 --- Open the plz dashboard.
 function M.open()
-  vim.cmd("tabnew")
+  state.prev_buf = vim.api.nvim_get_current_buf()
 
   state.list_buf = vim.api.nvim_create_buf(false, true)
   vim.bo[state.list_buf].buftype = "nofile"
@@ -79,68 +141,72 @@ end
 function M._fetch_tab(idx)
   state.tab_idx = idx
   state.prs = {}
-  M._set_buf_lines(state.list_buf, { "", "  Loading..." })
-  M._set_buf_lines(state.preview_buf, {})
+
+  -- Write/update the header (updates active tab highlight)
+  M._write_header()
+
+  -- Replace body (lines below header) with "Loading..."
+  set_buf_lines_from(state.list_buf, HEADER_LINES, { "", "  Loading..." })
+  set_buf_lines(state.preview_buf, {})
 
   fetch.fetch_section(idx, function(prs, err)
     if err then
-      M._set_buf_lines(state.list_buf, { "", "  Error: " .. err })
+      set_buf_lines_from(state.list_buf, HEADER_LINES, { "", "  Error: " .. err })
       return
     end
     state.prs = prs or {}
-    M._render_list()
+    M._render_rows()
+    M._fetch_ado_batch()
     M._update_preview()
   end)
 end
 
---- Render the full PR list buffer with highlights.
-function M._render_list()
+--- Batch-fetch ADO work items for all PRs that have AB# references.
+function M._fetch_ado_batch()
+  for _, pr in ipairs(state.prs) do
+    local ab_id = ((pr.title or ""):match("AB#(%d+)") or (pr.body or ""):match("AB#(%d+)"))
+    if ab_id and not state.ado_cache[ab_id] then
+      ado.fetch_work_item(ab_id, function(item, _err)
+        if item then
+          state.ado_cache[ab_id] = item
+          -- Re-render rows to show fetched ADO data
+          M._render_rows()
+        end
+      end)
+    end
+  end
+end
+
+--- Render PR rows below the header.
+function M._render_rows()
   if not state.list_buf or not vim.api.nvim_buf_is_valid(state.list_buf) then return end
 
-  local tw = title_width()
+  local cols = get_cols()
   local lines = {}
-  local all_regions = {} -- regions per line
+  local all_regions = {}
 
-  -- Line 1: Tab bar
-  local tab_text, tab_regions = render.tab_line(fetch.sections, state.tab_idx)
-  lines[1] = tab_text
-  all_regions[1] = tab_regions
-
-  -- Line 2: Border
-  local win_w = state.list_win and vim.api.nvim_win_is_valid(state.list_win)
-    and vim.api.nvim_win_get_width(state.list_win) or 90
-  lines[2] = string.rep("─", win_w)
-  all_regions[2] = { { 0, #lines[2], "PlzBorder" } }
-
-  -- Line 3: Column headers
-  local header_text, header_regions = render.header_line(tw)
-  lines[3] = header_text
-  all_regions[3] = header_regions
-
-  -- Line 4: Border
-  lines[4] = string.rep("─", win_w)
-  all_regions[4] = { { 0, #lines[4], "PlzBorder" } }
-
-  -- PR rows
   if #state.prs == 0 then
-    lines[5] = ""
-    lines[6] = "  No PRs found"
-    all_regions[5] = {}
-    all_regions[6] = { { 0, #lines[6], "PlzFaint" } }
+    lines[1] = ""
+    lines[2] = "  No PRs found"
+    all_regions[1] = {}
+    all_regions[2] = { { 0, #lines[2], "PlzFaint" } }
   else
     for _, pr in ipairs(state.prs) do
-      local row_text, row_regions = render.format_row(pr, tw)
+      local ab_id = ((pr.title or ""):match("AB#(%d+)") or (pr.body or ""):match("AB#(%d+)"))
+      local ado_item = ab_id and state.ado_cache[ab_id] or nil
+      local row_text, row_regions = render.format_row(pr, cols, ado_item)
       table.insert(lines, row_text)
       table.insert(all_regions, row_regions)
     end
   end
 
-  M._set_buf_lines(state.list_buf, lines)
+  -- Replace only lines after header
+  set_buf_lines_from(state.list_buf, HEADER_LINES, lines)
 
-  -- Apply all highlights
-  render.clear(state.list_buf)
+  -- Re-apply all highlights (header + rows)
+  M._write_header()
   for i, regions in ipairs(all_regions) do
-    render.apply_regions(state.list_buf, i - 1, regions)
+    render.apply_regions(state.list_buf, HEADER_LINES + i - 1, regions)
   end
 
   -- Position cursor on first PR
@@ -158,10 +224,27 @@ function M._update_preview()
   local pr_idx = cursor[1] - HEADER_LINES
   local pr = state.prs[pr_idx]
 
-  local preview_lines, line_regions = render.format_preview(pr)
-  M._set_buf_lines(state.preview_buf, preview_lines)
+  -- Check for ADO work item and fetch if needed
+  local ado_item = nil
+  if pr then
+    local ado_id = ado.extract_id(pr.title or "") or ado.extract_id(pr.body or "")
+    if ado_id then
+      if state.ado_cache[ado_id] then
+        ado_item = state.ado_cache[ado_id]
+      else
+        ado.fetch_work_item(ado_id, function(item, _err)
+          if item then
+            state.ado_cache[ado_id] = item
+            M._update_preview()
+          end
+        end)
+      end
+    end
+  end
 
-  -- Apply preview highlights
+  local preview_lines, line_regions = render.format_preview(pr, ado_item)
+  set_buf_lines(state.preview_buf, preview_lines)
+
   local preview_ns = vim.api.nvim_create_namespace("plz_dashboard_preview")
   vim.api.nvim_buf_clear_namespace(state.preview_buf, preview_ns, 0, -1)
   for i, regions in ipairs(line_regions) do
@@ -182,7 +265,6 @@ function M._setup_keymaps()
   local buf = state.list_buf
   local opts = { buffer = buf, nowait = true }
 
-  -- Tab switching
   for i = 1, #fetch.sections do
     vim.keymap.set("n", tostring(i), function()
       M._fetch_tab(i)
@@ -233,7 +315,7 @@ function M._setup_keymaps()
       "  q         close",
       "  ?         this help",
     }
-    M._set_buf_lines(state.preview_buf, help)
+    set_buf_lines(state.preview_buf, help)
   end, vim.tbl_extend("force", opts, { desc = "Show help" }))
 end
 
@@ -244,21 +326,23 @@ function M._get_selected_pr()
   return state.prs[pr_idx]
 end
 
---- Helper to set buffer lines.
-function M._set_buf_lines(buf, lines)
-  if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
-  vim.bo[buf].modifiable = true
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.bo[buf].modifiable = false
-end
-
 --- Close the dashboard.
 function M.close()
   if state.autocmd_id then
     pcall(vim.api.nvim_del_autocmd, state.autocmd_id)
     state.autocmd_id = nil
   end
-  pcall(vim.cmd, "tabclose")
+
+  if state.preview_win and vim.api.nvim_win_is_valid(state.preview_win) then
+    pcall(vim.api.nvim_win_close, state.preview_win, true)
+  end
+
+  if state.prev_buf and vim.api.nvim_buf_is_valid(state.prev_buf) then
+    if state.list_win and vim.api.nvim_win_is_valid(state.list_win) then
+      vim.api.nvim_win_set_buf(state.list_win, state.prev_buf)
+    end
+  end
+
   for _, buf in ipairs({ state.list_buf, state.preview_buf }) do
     if buf and vim.api.nvim_buf_is_valid(buf) then
       pcall(vim.api.nvim_buf_delete, buf, { force = true })
@@ -268,6 +352,7 @@ function M.close()
   state.preview_buf = nil
   state.list_win = nil
   state.preview_win = nil
+  state.prev_buf = nil
   state.prs = {}
 end
 

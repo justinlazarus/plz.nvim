@@ -14,45 +14,76 @@ local u = utf8 and utf8.char or function(cp)
 end
 
 M.icons = {
-  -- PR state (nerd font codepoints)
-  open     = u(0xe728),  --
-  draft    = u(0xe729),  --
-  closed   = u(0xe72d),  --
-  merged   = u(0xe727),  --
-  -- CI status
-  ci_pass  = u(0xf058),  --
-  ci_fail  = u(0xf0159), -- 󰅙
-  ci_wait  = u(0xf110),  --
-  ci_none  = u(0xf192),  --
-  -- Review
-  approved = u(0xf012c), -- 󰄬
-  changes  = u(0xe737),  --
-  waiting  = u(0xf110),  --
-  comment  = u(0xf075),  --
-  -- Column headers
-  comments = u(0xf086),  --
-  review   = u(0xf0be2), -- 󰯢
-  ci       = u(0xf013),  --
-  lines    = u(0xf120),  --
-  updated  = u(0xf19bb), -- 󱦻
-  -- Misc
-  dot      = u(0x22c5),  -- ⋅
-  person   = u(0xf007),  --
+  -- PR state (from gh-dash constants.go)
+  pr       = u(0xf407),  -- OpenIcon
+  open     = u(0xf407),  -- OpenIcon
+  draft    = u(0xebdb),  -- DraftIcon
+  closed   = u(0xf4dc),  -- ClosedIcon
+  merged   = u(0xf4c9),  -- MergedIcon
+  -- CI status (from gh-dash prrow.go)
+  ci_pass  = u(0xf058),  -- SuccessIcon
+  ci_fail  = u(0xf0159), -- FailureIcon
+  ci_wait  = u(0xe641),  -- WaitingIcon (used for CI pending too)
+  ci_none  = u(0xeabd),  -- EmptyIcon
+  -- Review status (from gh-dash prrow.go)
+  approved = u(0xf012c), -- ApprovedIcon
+  changes  = u(0xeb43),  -- ChangesRequestedIcon
+  waiting  = u(0xe641),  -- WaitingIcon (no reviews yet)
+  comment  = u(0xf27b),  -- CommentIcon (has reviews, undecided)
+  -- Column headers (from gh-dash prssection.go)
+  comments = u(0xf0e6),  -- CommentsIcon
+  review_h = u(0xf0be2), -- review column header
+  ci       = u(0xf45e),  -- CI column header
+  lines    = u(0xf440),  -- lines column header
+  updated  = u(0xf19bb), -- updated column header
+  created  = u(0xf1862), -- created column header
+  -- ADO (plz-specific)
+  ado_bug   = u(0xeaaf),
+  ado_story = u(0xf1a9e),
+  ado_none  = u(0xf073a),
+  ado_h     = u(0xf0ae),
+  -- Git
+  branch   = u(0xe725),
+  -- Misc (from gh-dash constants.go)
+  dot      = u(0xf444),  -- DotIcon
+  person   = u(0xf415),  -- PersonIcon
 }
 
--- ── Column widths (compact mode, matching gh-dash) ──
+-- ── Column layout ──
 
-local COL = {
-  state   = 3,
-  number  = 7,
-  -- title is flexible (fills remaining)
-  author  = 22,
-  comments = 5,
-  review  = 3,
-  ci      = 3,
-  lines   = 13,
-  age     = 6,
-}
+--- Compute column widths that fill the window evenly.
+--- @param win_width number
+--- @return table col_widths {state, number, title, author, review, ci, add, del, age}
+function M.compute_columns(win_width)
+  -- Fixed-width columns
+  local state_w    = 3
+  local author_w   = 24
+  local comments_w = 5
+  local review_w   = 4
+  local ci_w       = 4
+  local lines_w    = 12
+  local updated_w  = 5
+  local created_w  = 5
+  local ado_w      = 4
+  local base_w     = 20
+
+  local fixed = state_w + author_w + comments_w + review_w + ci_w + lines_w + updated_w + created_w + ado_w + base_w
+  local title_w = math.max(20, win_width - fixed)
+
+  return {
+    state    = state_w,
+    title    = title_w,
+    author   = author_w,
+    comments = comments_w,
+    review   = review_w,
+    ci       = ci_w,
+    lines    = lines_w,
+    updated  = updated_w,
+    created  = created_w,
+    ado      = ado_w,
+    base     = base_w,
+  }
+end
 
 --- Render the tab bar line and return highlight regions.
 --- @param sections table[]
@@ -107,8 +138,12 @@ local function build_row(columns)
     end
 
     table.insert(parts, text)
-    if hl then
+    if type(hl) == "string" then
       table.insert(regions, { pos, pos + #text, hl })
+    elseif type(hl) == "table" then
+      for _, r in ipairs(hl) do
+        table.insert(regions, { pos + r[1], pos + r[2], r[3] })
+      end
     end
     pos = pos + #text
   end
@@ -118,57 +153,92 @@ end
 
 --- Format a PR row and return the line + highlight regions.
 --- @param pr table
---- @param title_width number
+--- @param cols table from compute_columns
+--- @param ado_item table|nil  fetched ADO work item
 --- @return string line
 --- @return table[] regions
-function M.format_row(pr, title_width)
-  title_width = title_width or 40
-
-  local state_icon, state_hl = M._state_icon(pr)
-  local rev_icon, rev_hl = M._review_icon(pr.reviewDecision)
+function M.format_row(pr, cols, ado_item)
+  local rev_icon, rev_hl = M._review_icon(pr.reviewDecision, pr.reviews)
   local ci_icon, ci_hl = M._ci_icon(pr.statusCheckRollup)
-  local add_str = string.format("+%d", pr.additions or 0)
-  local del_str = string.format("-%d", pr.deletions or 0)
-  local title = M._truncate(pr.title or "", title_width)
-  local author = M._truncate((pr.author and pr.author.login) or "?", COL.author - 2)
+  local add_str = string.format("+%s", M._format_number(pr.additions or 0))
+  local del_str = string.format("-%s", M._format_number(pr.deletions or 0))
+  local title = M._truncate(M._clean_title(pr.title or "", pr.headRefName or ""), cols.title - 1)
+  local raw_name = (pr.author and (pr.author.name or pr.author.login)) or "?"
+  local author = M._truncate(raw_name:gsub("%s*%[.-%]%s*$", ""), cols.author - 2)
+
+  -- ADO column (icon only)
+  local ado_str = M.icons.ado_none
+  local ado_hl = "PlzError"
+  local ab_id = ((pr.title or ""):match("AB#(%d+)") or (pr.body or ""):match("AB#(%d+)"))
+  if ab_id then
+    if ado_item then
+      local is_bug = ado_item.type == "Bug"
+      ado_str = is_bug and M.icons.ado_bug or M.icons.ado_story
+      local item_state = (ado_item.state or ""):lower()
+      if item_state == "new" or item_state == "active" then
+        ado_hl = is_bug and "PlzError" or "PlzSuccess"
+      else
+        ado_hl = "PlzFaint"
+      end
+    else
+      ado_str = M.icons.dot
+      ado_hl = "PlzFaint"
+    end
+  end
+
+  -- PR icon: blue for open, gray for draft
+  local pr_icon = M.icons.pr
+  local pr_hl = "PlzOpen"
+  if pr.isDraft then pr_icon = M.icons.draft; pr_hl = "PlzDraft"
+  elseif (pr.state or "") == "MERGED" then pr_icon = M.icons.merged; pr_hl = "PlzMerged"
+  elseif (pr.state or "") == "CLOSED" then pr_icon = M.icons.closed; pr_hl = "PlzClosed"
+  end
+
+  -- Comment count
+  local comment_count = type(pr.comments) == "table" and #pr.comments or 0
+  local comment_str = comment_count > 0 and tostring(comment_count) or ""
 
   return build_row({
-    { " " .. state_icon, 3, state_hl },
-    { string.format("#%-5d", pr.number), 7, "PlzFaint" },
-    { title, title_width + 1 },
-    { author, COL.author, "PlzFaint" },
-    { rev_icon, 3, rev_hl },
-    { ci_icon, 3, ci_hl },
-    { add_str, #add_str + 1, "PlzDiffAdd" },
-    { del_str, 8, "PlzDiffRemove" },
-    { M._relative_time(pr.updatedAt), nil, "PlzFaint" },
+    { " " .. pr_icon, cols.state, pr_hl },
+    { " " .. ado_str, cols.ado, ado_hl },
+    { comment_str, cols.comments, comment_count > 0 and "PlzFaint" or nil },
+    { " " .. rev_icon, cols.review, rev_hl },
+    { " " .. ci_icon, cols.ci, ci_hl },
+    { M._lines_cell(add_str, del_str), cols.lines, M._lines_regions(add_str, del_str) },
+    { M._relative_time(pr.updatedAt), cols.updated, "PlzFaint" },
+    { M._relative_time(pr.createdAt), cols.created, "PlzFaint" },
+    { M._truncate(pr.baseRefName or "?", cols.base - 2), cols.base, "PlzFaint" },
+    { author, cols.author, "PlzFaint" },
+    { title, nil },
   })
 end
 
 --- Format column header line.
---- @param title_width number
+--- @param cols table from compute_columns
 --- @return string
 --- @return table[] regions
-function M.header_line(title_width)
-  title_width = title_width or 40
-
+function M.header_line(cols)
   return build_row({
-    { "", 3, "PlzHeader" },
-    { "#", 7, "PlzHeader" },
-    { "Title", title_width + 1, "PlzHeader" },
-    { "Author", COL.author, "PlzHeader" },
-    { M.icons.review, 3, "PlzHeader" },
-    { M.icons.ci, 3, "PlzHeader" },
-    { "+/-", 9, "PlzHeader" },
-    { M.icons.updated, nil, "PlzHeader" },
+    { "", cols.state, "PlzHeader" },
+    { " " .. M.icons.ado_h, cols.ado, "PlzHeader" },
+    { M.icons.comments, cols.comments, "PlzHeader" },
+    { " " .. M.icons.review_h, cols.review, "PlzHeader" },
+    { " " .. M.icons.ci, cols.ci, "PlzHeader" },
+    { M.icons.lines, cols.lines, "PlzHeader" },
+    { M.icons.updated, cols.updated, "PlzHeader" },
+    { M.icons.created, cols.created, "PlzHeader" },
+    { M.icons.branch, cols.base, "PlzHeader" },
+    { "Author", cols.author, "PlzHeader" },
+    { "Title", nil, "PlzHeader" },
   })
 end
 
 --- Format preview pane content for a PR.
 --- @param pr table|nil
+--- @param ado_item table|nil  Fetched ADO work item (nil = not yet loaded)
 --- @return string[] lines
 --- @return table[] line_regions (array of arrays of regions per line)
-function M.format_preview(pr)
+function M.format_preview(pr, ado_item)
   if not pr then
     return { "", "  Select a PR to see details" }, {}
   end
@@ -216,11 +286,41 @@ function M.format_preview(pr)
     add(ci_line)
   end
 
-  -- ADO work item (placeholder — fetched async when wired up)
+  -- ADO work item
   local ado_id = (pr.title or ""):match("AB#(%d+)") or (pr.body or ""):match("AB#(%d+)")
   if ado_id then
-    -- Will be replaced with real data: type · AB#id · state · assignee · tags
-    add(string.format("  ADO AB#%s  —  type · state · assignee · tags", ado_id), { { 0, 0, "PlzFaint" } })
+    if ado_item then
+      local type_icon = ado_item.type == "Bug" and M.icons.ado_bug or M.icons.ado_story
+      local ado_line = string.format("  %s AB#%s · %s · %s",
+        type_icon, ado_item.id, ado_item.state or "?", ado_item.assigned_to or "?")
+      add(ado_line, { { 0, #ado_line, "PlzAccent" } })
+
+      -- Tags as pills
+      if ado_item.tags and ado_item.tags ~= "" then
+        local tag_parts = {}
+        local tag_regions = {}
+        local pos = 2 -- starting after "  " indent
+        table.insert(tag_parts, "  ")
+        for tag in ado_item.tags:gmatch("[^;]+") do
+          tag = vim.trim(tag)
+          if tag ~= "" then
+            local pill = " " .. tag .. " "
+            if #tag_parts > 1 then
+              table.insert(tag_parts, " ")
+              pos = pos + 1
+            end
+            table.insert(tag_parts, pill)
+            table.insert(tag_regions, { pos, pos + #pill, "PlzPill" })
+            pos = pos + #pill
+          end
+        end
+        if #tag_parts > 1 then
+          add(table.concat(tag_parts), tag_regions)
+        end
+      end
+    else
+      add(string.format("  ADO AB#%s  loading...", ado_id), { { 0, 0, "PlzFaint" } })
+    end
   end
 
   add("")
@@ -261,6 +361,48 @@ function M._pad(str, width)
   return str .. string.rep(" ", width - len)
 end
 
+function M._lines_cell(add_str, del_str)
+  return add_str .. " " .. del_str
+end
+
+function M._lines_regions(add_str, del_str)
+  return {
+    { 0, #add_str, "PlzDiffAdd" },
+    { #add_str + 1, #add_str + 1 + #del_str, "PlzDiffRemove" },
+  }
+end
+
+function M._clean_title(title, branch)
+  -- Remove anything in brackets: [Main], [Bug], [Shipping Redesign], etc.
+  title = title:gsub("%s*%[.-%]%s*", " ")
+  -- Remove AB#12345 references
+  title = title:gsub("%s*AB#%d+%s*", " ")
+  -- Remove branch name if present (with slashes/dashes)
+  if branch and branch ~= "" then
+    -- Escape pattern special chars in branch name
+    local escaped = branch:gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
+    title = title:gsub("%s*" .. escaped .. "%s*", " ")
+    -- Also try without the prefix (e.g. "feature/" removed, just the slug)
+    local slug = branch:match("[^/]+$") or ""
+    if slug ~= "" and slug ~= branch then
+      local escaped_slug = slug:gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
+      title = title:gsub("%s*" .. escaped_slug .. "%s*", " ")
+    end
+  end
+  -- Remove leading/trailing dashes, dots, colons, whitespace
+  title = title:gsub("^[%s%-%.:–—]+", ""):gsub("[%s%-%.:–—]+$", "")
+  -- Collapse multiple spaces
+  title = title:gsub("%s+", " ")
+  return title
+end
+
+function M._format_number(n)
+  if n >= 1000 then
+    return string.format("%.1fk", n / 1000)
+  end
+  return tostring(n)
+end
+
 function M._truncate(str, max)
   if #str <= max then return str end
   return string.sub(str, 1, max - 1) .. "…"
@@ -275,11 +417,11 @@ function M._state_icon(pr)
   end
 end
 
-function M._review_icon(decision)
+function M._review_icon(decision, reviews)
   if decision == "APPROVED" then return M.icons.approved, "PlzSuccess"
   elseif decision == "CHANGES_REQUESTED" then return M.icons.changes, "PlzError"
-  elseif decision == "REVIEW_REQUIRED" then return M.icons.waiting, "PlzWarning"
-  else return " ", nil
+  elseif type(reviews) == "table" and #reviews > 0 then return M.icons.comment, "PlzFaint"
+  else return M.icons.waiting, "PlzWarning"
   end
 end
 

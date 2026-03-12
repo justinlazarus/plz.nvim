@@ -12,6 +12,7 @@ M.config = {
 }
 
 function M.setup(opts)
+  M._did_setup = true
   M.config = vim.tbl_deep_extend("force", M.config, opts or {})
 
   -- Diff highlights — fg only, matching difftastic terminal style
@@ -32,6 +33,7 @@ function M.setup(opts)
   vim.api.nvim_set_hl(0, "PlzTabInactive", { fg = "#656C76", default = true })
   vim.api.nvim_set_hl(0, "PlzBorder", { fg = "#3E4452", default = true })
   vim.api.nvim_set_hl(0, "PlzHeader", { fg = "#656C76", default = true })
+  vim.api.nvim_set_hl(0, "PlzPill", { fg = "#ABB2BF", bg = "#3E4452", default = true })
 
   -- Non-diff highlights — link to existing groups
   local highlights = {
