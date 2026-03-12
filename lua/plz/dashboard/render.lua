@@ -115,7 +115,23 @@ function M.tab_line(sections, active_idx)
     pos = pos + #label
   end
 
+  -- Trailing separator
+  local sep = "│"
+  table.insert(parts, sep)
+  table.insert(regions, { pos, pos + #sep, "PlzBorder" })
+  pos = pos + #sep
+
   return table.concat(parts), regions
+end
+
+--- Render the filter line (search bar style).
+--- @param filter string
+--- @return string line
+--- @return table[] regions
+function M.filter_line(filter)
+  local icon = u(0xf002) -- nf-fa-search
+  local text = " " .. icon .. " " .. filter
+  return text, { { 0, #(" " .. icon), "PlzFaint" }, { #(" " .. icon), #text, "PlzFaint" } }
 end
 
 --- Build a row using a shared column structure.

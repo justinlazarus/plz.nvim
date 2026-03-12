@@ -6,8 +6,8 @@ local M = {}
 
 local ns = vim.api.nvim_create_namespace("plz_dashboard")
 
--- Header: tab bar + border + column header + border = 4 lines
-local HEADER_LINES = 4
+-- Header: tab bar + border + filter + border + column header + border = 6 lines
+local HEADER_LINES = 6
 
 local state = {
   tab_idx = 1,
@@ -19,6 +19,9 @@ local state = {
   autocmd_id = nil,
   ado_cache = {}, -- keyed by work item ID
   prev_buf = nil, -- buffer to restore on close
+  filter_overrides = {}, -- per-tab session filter overrides
+  editing_filter = false,
+  filter_buf = nil, -- 1-line scratch buffer for filter editing
 }
 
 --- Compute title column width based on window width.
@@ -56,21 +59,31 @@ function M._write_header()
   local lines = {}
   local all_regions = {}
 
+  local win_w = state.list_win and vim.api.nvim_win_is_valid(state.list_win)
+    and vim.api.nvim_win_get_width(state.list_win) or 90
+  local border = string.rep("─", win_w)
+
   local tab_text, tab_regions = render.tab_line(fetch.sections, state.tab_idx)
   lines[1] = tab_text
   all_regions[1] = tab_regions
 
-  local win_w = state.list_win and vim.api.nvim_win_is_valid(state.list_win)
-    and vim.api.nvim_win_get_width(state.list_win) or 90
-  lines[2] = string.rep("─", win_w)
-  all_regions[2] = { { 0, #lines[2], "PlzBorder" } }
+  lines[2] = border
+  all_regions[2] = { { 0, #border, "PlzBorder" } }
+
+  -- Filter line
+  local filter_text, filter_regions = render.filter_line(M._get_filter())
+  lines[3] = filter_text
+  all_regions[3] = filter_regions
+
+  lines[4] = border
+  all_regions[4] = { { 0, #border, "PlzBorder" } }
 
   local header_text, header_regions = render.header_line(cols)
-  lines[3] = header_text
-  all_regions[3] = header_regions
+  lines[5] = header_text
+  all_regions[5] = header_regions
 
-  lines[4] = string.rep("─", win_w)
-  all_regions[4] = { { 0, #lines[4], "PlzBorder" } }
+  lines[6] = border
+  all_regions[6] = { { 0, #border, "PlzBorder" } }
 
   -- Replace only the first 4 lines
   vim.bo[state.list_buf].modifiable = true
@@ -290,6 +303,10 @@ function M._setup_keymaps()
     M._fetch_tab(state.tab_idx)
   end, vim.tbl_extend("force", opts, { desc = "Refresh" }))
 
+  vim.keymap.set("n", "/", function()
+    M._edit_filter()
+  end, vim.tbl_extend("force", opts, { desc = "Edit filter" }))
+
   vim.keymap.set("n", "q", function()
     M.close()
   end, vim.tbl_extend("force", opts, { desc = "Close dashboard" }))
@@ -309,6 +326,7 @@ function M._setup_keymaps()
       "  <CR>      open PR for review",
       "  o         open in browser",
       "  r         refresh",
+      "  /         edit filter",
       "  1-" .. #fetch.sections .. "       switch tab",
       "  <Tab>     next tab",
       "  <S-Tab>   previous tab",
@@ -317,6 +335,96 @@ function M._setup_keymaps()
     }
     set_buf_lines(state.preview_buf, help)
   end, vim.tbl_extend("force", opts, { desc = "Show help" }))
+end
+
+--- Get the active filter string for the current tab.
+function M._get_filter()
+  return state.filter_overrides[state.tab_idx] or fetch.sections[state.tab_idx].filter
+end
+
+--- Enter filter editing mode.
+function M._edit_filter()
+  if state.editing_filter then return end
+  state.editing_filter = true
+
+  local current = M._get_filter()
+  local win_w = state.list_win and vim.api.nvim_win_is_valid(state.list_win)
+    and vim.api.nvim_win_get_width(state.list_win) or 90
+
+  -- Create a 1-line scratch buffer for editing
+  state.filter_buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[state.filter_buf].buftype = "nofile"
+  vim.bo[state.filter_buf].bufhidden = "wipe"
+
+  -- Open as a floating window over the filter line (row 1, 0-indexed)
+  local filter_win = vim.api.nvim_open_win(state.filter_buf, true, {
+    relative = "win",
+    win = state.list_win,
+    row = 2,
+    col = 0,
+    width = win_w,
+    height = 1,
+    style = "minimal",
+    border = "none",
+  })
+  vim.wo[filter_win].winhl = "Normal:PlzFaint"
+
+  -- Pre-fill with current filter
+  vim.api.nvim_buf_set_lines(state.filter_buf, 0, -1, false, { " " .. current })
+  vim.cmd("startinsert!")
+
+  -- Enter confirms, Esc cancels
+  local function close_filter(apply)
+    if not state.editing_filter then return end
+    state.editing_filter = false
+    vim.cmd("stopinsert")
+
+    if apply then
+      local new_filter = vim.trim(vim.api.nvim_buf_get_lines(state.filter_buf, 0, 1, false)[1] or "")
+      if new_filter ~= "" then
+        state.filter_overrides[state.tab_idx] = new_filter
+      end
+    end
+
+    if vim.api.nvim_win_is_valid(filter_win) then
+      pcall(vim.api.nvim_win_close, filter_win, true)
+    end
+    state.filter_buf = nil
+
+    if apply then
+      M._fetch_tab_with_filter(state.tab_idx)
+    else
+      M._write_header()
+    end
+  end
+
+  vim.keymap.set("i", "<CR>", function() close_filter(true) end, { buffer = state.filter_buf })
+  vim.keymap.set("i", "<Esc>", function() close_filter(false) end, { buffer = state.filter_buf })
+  vim.keymap.set("n", "<Esc>", function() close_filter(false) end, { buffer = state.filter_buf })
+end
+
+--- Fetch using the current (possibly overridden) filter.
+function M._fetch_tab_with_filter(idx)
+  state.tab_idx = idx
+  state.prs = {}
+
+  M._write_header()
+  set_buf_lines_from(state.list_buf, HEADER_LINES, { "", "  Loading..." })
+  set_buf_lines(state.preview_buf, {})
+
+  local filter = M._get_filter()
+  local args = fetch.args_from_filter(filter)
+  local gh = require("plz.gh")
+  gh.run(args, function(prs, err)
+    if err then
+      set_buf_lines_from(state.list_buf, HEADER_LINES, { "", "  Error: " .. err })
+      return
+    end
+    state.prs = prs or {}
+    M._render_rows()
+    M._fetch_ado_batch()
+    M._update_preview()
+  end)
 end
 
 --- Get the PR under the cursor.
