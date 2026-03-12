@@ -20,6 +20,7 @@ local state = {
   filter_overrides = {}, -- per-tab session filter overrides
   editing_filter = false,
   filter_buf = nil, -- 1-line scratch buffer for filter editing
+  fetch_gen = 0, -- generation counter to ignore stale fetch callbacks
 }
 
 --- Compute column layout for the current window width.
@@ -135,7 +136,10 @@ function M._fetch_tab(idx)
   -- Replace body (lines below header) with "Loading..."
   set_buf_lines_from(state.list_buf, HEADER_LINES, { "", "  Loading..." })
 
+  state.fetch_gen = state.fetch_gen + 1
+  local gen = state.fetch_gen
   fetch.fetch_section(idx, function(prs, err)
+    if gen ~= state.fetch_gen then return end -- stale callback
     if err then
       set_buf_lines_from(state.list_buf, HEADER_LINES, { "", "  Error: " .. err })
       return
@@ -338,10 +342,13 @@ function M._fetch_tab_with_filter(idx)
   M._write_header()
   set_buf_lines_from(state.list_buf, HEADER_LINES, { "", "  Loading..." })
 
+  state.fetch_gen = state.fetch_gen + 1
+  local gen = state.fetch_gen
   local filter = M._get_filter()
   local args = fetch.args_from_filter(filter)
   local gh = require("plz.gh")
   gh.run(args, function(prs, err)
+    if gen ~= state.fetch_gen then return end -- stale callback
     if err then
       set_buf_lines_from(state.list_buf, HEADER_LINES, { "", "  Error: " .. err })
       return
