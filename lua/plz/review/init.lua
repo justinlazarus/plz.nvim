@@ -509,6 +509,126 @@ function M._render_commits()
   end
 end
 
+--- Parse a markdown line into display text and highlight regions.
+--- @param raw string Raw markdown line
+--- @param offset number Column offset (e.g. 2 for "  " prefix)
+--- @return string display_line
+--- @return table[] regions
+local function parse_md_line(raw, offset)
+  local regions = {}
+  local line = raw
+
+  -- Heading lines: # ## ### etc
+  local hashes, heading_text = line:match("^(#+)%s+(.*)")
+  if hashes then
+    local display = string.rep("  ", #hashes - 1) .. heading_text
+    table.insert(regions, { offset, offset + #display, #hashes <= 2 and "PlzAccent" or "PlzHeader" })
+    return display, regions
+  end
+
+  -- Horizontal rules
+  if line:match("^%-%-%-+$") or line:match("^%*%*%*+$") or line:match("^___+$") then
+    local display = "─────"
+    table.insert(regions, { offset, offset + #display, "PlzBorder" })
+    return display, regions
+  end
+
+  -- Checkbox list items
+  local indent, checked, rest = line:match("^(%s*)%- %[([ xX])%]%s*(.*)")
+  if indent then
+    local is_checked = checked ~= " "
+    local check_icon = is_checked and icons.ci_pass or "○"
+    local prefix = indent .. check_icon .. " "
+    -- Process inline markdown on the rest
+    local inner_display, inner_regions = parse_md_line(rest, offset + #prefix)
+    local display = prefix .. inner_display
+    local check_hl = is_checked and "PlzSuccess" or "PlzFaint"
+    table.insert(regions, { offset + #indent, offset + #indent + #check_icon, check_hl })
+    for _, r in ipairs(inner_regions) do
+      table.insert(regions, r)
+    end
+    if is_checked then
+      -- Strikethrough effect: dim the text
+      table.insert(regions, { offset + #prefix, offset + #display, "PlzFaint" })
+    end
+    return display, regions
+  end
+
+  -- Bullet list items: - or *
+  local list_indent, list_rest = line:match("^(%s*)[%-%*]%s+(.*)")
+  if list_indent then
+    local bullet = list_indent .. "• "
+    local inner_display, inner_regions = parse_md_line(list_rest, offset + #bullet)
+    return bullet .. inner_display, vim.list_extend(regions, inner_regions)
+  end
+
+  -- Inline rendering: process **bold**, *italic*, `code`, [links](url)
+  local display = ""
+  local pos = offset
+  local i = 1
+  while i <= #line do
+    -- Bold: **text**
+    if line:sub(i, i + 1) == "**" then
+      local close = line:find("**", i + 2, true)
+      if close then
+        local inner = line:sub(i + 2, close - 1)
+        table.insert(regions, { pos, pos + #inner, "PlzBold" })
+        display = display .. inner
+        pos = pos + #inner
+        i = close + 2
+        goto continue
+      end
+    end
+    -- Inline code: `text`
+    if line:sub(i, i) == "`" and line:sub(i, i + 2) ~= "```" then
+      local close = line:find("`", i + 1, true)
+      if close then
+        local inner = line:sub(i + 1, close - 1)
+        local padded = " " .. inner .. " "
+        table.insert(regions, { pos, pos + #padded, "PlzCode" })
+        display = display .. padded
+        pos = pos + #padded
+        i = close + 1
+        goto continue
+      end
+    end
+    -- Link: [text](url)
+    if line:sub(i, i) == "[" then
+      local text_end = line:find("]", i + 1, true)
+      if text_end and line:sub(text_end + 1, text_end + 1) == "(" then
+        local url_end = line:find(")", text_end + 2, true)
+        if url_end then
+          local link_text = line:sub(i + 1, text_end - 1)
+          table.insert(regions, { pos, pos + #link_text, "PlzLink" })
+          display = display .. link_text
+          pos = pos + #link_text
+          i = url_end + 1
+          goto continue
+        end
+      end
+    end
+    -- Italic: *text* (single asterisk, not bold)
+    if line:sub(i, i) == "*" and line:sub(i, i + 1) ~= "**" then
+      local close = line:find("%*", i + 1)
+      if close and line:sub(close, close + 1) ~= "**" then
+        local inner = line:sub(i + 1, close - 1)
+        table.insert(regions, { pos, pos + #inner, "PlzItalic" })
+        display = display .. inner
+        pos = pos + #inner
+        i = close + 1
+        goto continue
+      end
+    end
+    -- Regular character
+    display = display .. line:sub(i, i)
+    pos = pos + 1
+    i = i + 1
+    ::continue::
+  end
+
+  return display, regions
+end
+
 --- Render the description view in the summary buffer.
 function M._render_description()
   local pr = state.pr
@@ -516,19 +636,30 @@ function M._render_description()
   local lines = {}
   local hl_regions = {}
 
-  -- Header
-  table.insert(lines, "  Description")
-  table.insert(hl_regions, { { 0, 13, "PlzAccent" } })
-  table.insert(lines, "")
-  table.insert(hl_regions, {})
+  body = body:gsub("\r", "")
+  local pad = "  "
+  local in_code_block = false
 
   if body == "" then
-    table.insert(lines, "  No description provided.")
+    table.insert(lines, pad .. "No description provided.")
     table.insert(hl_regions, { { 2, 28, "PlzFaint" } })
   else
-    for _, l in ipairs(vim.split(body, "\n", { plain = true })) do
-      table.insert(lines, "  " .. l)
-      table.insert(hl_regions, {})
+    for _, raw in ipairs(vim.split(body, "\n", { plain = true })) do
+      -- Code fence toggle
+      if raw:match("^```") then
+        in_code_block = not in_code_block
+        -- Skip the fence line itself
+        table.insert(lines, "")
+        table.insert(hl_regions, {})
+      elseif in_code_block then
+        local display = pad .. "  " .. raw
+        table.insert(lines, display)
+        table.insert(hl_regions, { { #pad, #display, "PlzCode" } })
+      else
+        local display, regions = parse_md_line(raw, #pad)
+        table.insert(lines, pad .. display)
+        table.insert(hl_regions, regions)
+      end
     end
   end
 

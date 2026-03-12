@@ -42,6 +42,10 @@ function M.setup(opts)
   vim.api.nvim_set_hl(0, "PlzYellow", { fg = "#E5C07B", default = true })
   vim.api.nvim_set_hl(0, "PlzHeader", { fg = "#656C76", default = true })
   vim.api.nvim_set_hl(0, "PlzPill", { fg = "#ABB2BF", bg = "#3E4452", default = true })
+  vim.api.nvim_set_hl(0, "PlzCode", { fg = "#ABB2BF", bg = "#3E4452", default = true })
+  vim.api.nvim_set_hl(0, "PlzLink", { fg = "#42A0FA", underline = true, default = true })
+  vim.api.nvim_set_hl(0, "PlzBold", { bold = true, default = true })
+  vim.api.nvim_set_hl(0, "PlzItalic", { italic = true, default = true })
 
   -- Non-diff highlights — link to existing groups
   local highlights = {
