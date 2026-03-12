@@ -1108,42 +1108,10 @@ function M._populate_diff(data)
   -- File navigation and q keymap on diff buffers
   M._setup_diff_keymaps(diff_state)
 
-  -- Show file position in status bar
-  M._update_diff_status()
-
   -- Focus the RHS (new code) window
   vim.api.nvim_set_current_win(state.diff_rhs_win)
 end
 
---- Update the file list winbar with file position and +/-.
-function M._update_diff_status()
-  if not state.current_file_idx then return end
-  if not state.win or not vim.api.nvim_win_is_valid(state.win) then return end
-  local file = state.files[state.current_file_idx]
-  if not file then return end
-
-  local path = file.filename or file.path or "?"
-  local pos = string.format("%d of %d", state.current_file_idx, #state.files)
-  local render = require("plz.dashboard.render")
-  local add_str = "+" .. render._format_number(file.additions or 0)
-  local del_str = "-" .. render._format_number(file.deletions or 0)
-
-  local bar = "%#PlzAccent#  " .. pos:gsub("%%", "%%%%")
-    .. "%#PlzFaint#  " .. path:gsub("%%", "%%%%")
-    .. "%="
-    .. "%#PlzDiffAdd#" .. add_str:gsub("%%", "%%%%")
-    .. "%#Normal# "
-    .. "%#PlzDiffRemove#" .. del_str:gsub("%%", "%%%%")
-    .. "%#Normal#  "
-  vim.wo[state.win].winbar = bar
-end
-
---- Clear the file list winbar.
-function M._clear_diff_status()
-  if state.win and vim.api.nvim_win_is_valid(state.win) then
-    vim.wo[state.win].winbar = nil
-  end
-end
 
 --- Set up keymaps on diff buffers (file nav, q).
 function M._setup_diff_keymaps(diff_state)
@@ -1360,8 +1328,7 @@ function M._close_diff()
     pcall(vim.api.nvim_win_close, state.diff_rhs_win, true)
   end
 
-  -- Clear file list statusline
-  M._clear_diff_status()
+
 
   state.diff_lhs_win = nil
   state.diff_rhs_win = nil
