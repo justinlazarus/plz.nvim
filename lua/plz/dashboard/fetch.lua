@@ -3,7 +3,7 @@ local gh = require("plz.gh")
 local M = {}
 
 local PR_FIELDS = table.concat({
-  "number", "title", "author", "reviewDecision",
+  "id", "number", "title", "author", "reviewDecision",
   "statusCheckRollup", "additions", "deletions",
   "updatedAt", "createdAt", "headRefName", "baseRefName",
   "isDraft", "url", "body", "changedFiles", "state", "comments", "reviews",
