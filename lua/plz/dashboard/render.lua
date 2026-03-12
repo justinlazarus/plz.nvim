@@ -42,6 +42,7 @@ M.icons = {
   ado_story = u(0xf1a9e),
   ado_none  = u(0xf073a),
   ado_h     = u(0xf0ae),
+  release   = u(0xf427),
   -- Git
   branch   = u(0xe725),
   -- Misc (from gh-dash constants.go)
@@ -65,9 +66,10 @@ function M.compute_columns(win_width)
   local updated_w  = 5
   local created_w  = 5
   local ado_w      = 4
+  local release_w  = 7
   local base_w     = 20
 
-  local fixed = state_w + author_w + comments_w + review_w + ci_w + lines_w + updated_w + created_w + ado_w + base_w
+  local fixed = state_w + author_w + comments_w + review_w + ci_w + lines_w + updated_w + created_w + ado_w + release_w + base_w
   local title_w = math.max(20, win_width - fixed)
 
   return {
@@ -81,6 +83,7 @@ function M.compute_columns(win_width)
     updated  = updated_w,
     created  = created_w,
     ado      = ado_w,
+    release  = release_w,
     base     = base_w,
   }
 end
@@ -202,6 +205,18 @@ function M.format_row(pr, cols, ado_item)
     end
   end
 
+  -- Release version (from ADO story tags)
+  local release_str = ""
+  if ado_item and ado_item.type ~= "Bug" and ado_item.tags and ado_item.tags ~= "" then
+    for tag in ado_item.tags:gmatch("[^;]+") do
+      local ver = vim.trim(tag):match("^[Rr]elease%s*(.+)")
+      if ver then
+        release_str = vim.trim(ver)
+        break
+      end
+    end
+  end
+
   -- PR icon: blue for open, gray for draft
   local pr_icon = M.icons.pr
   local pr_hl = "PlzOpen"
@@ -217,6 +232,7 @@ function M.format_row(pr, cols, ado_item)
   return build_row({
     { " " .. pr_icon, cols.state, pr_hl },
     { " " .. ado_str, cols.ado, ado_hl },
+    { release_str, cols.release, release_str ~= "" and "PlzFaint" or nil },
     { comment_str, cols.comments, comment_count > 0 and "PlzFaint" or nil },
     { " " .. rev_icon, cols.review, rev_hl },
     { " " .. ci_icon, cols.ci, ci_hl },
@@ -225,7 +241,7 @@ function M.format_row(pr, cols, ado_item)
     { M._relative_time(pr.createdAt), cols.created, "PlzFaint" },
     { M._truncate(pr.baseRefName or "?", cols.base - 2), cols.base, "PlzFaint" },
     { author, cols.author, "PlzFaint" },
-    { title, nil },
+    { title, nil, "PlzFaint" },
   })
 end
 
@@ -237,6 +253,7 @@ function M.header_line(cols)
   return build_row({
     { "", cols.state, "PlzHeader" },
     { " " .. M.icons.ado_h, cols.ado, "PlzHeader" },
+    { M.icons.release, cols.release, "PlzHeader" },
     { M.icons.comments, cols.comments, "PlzHeader" },
     { " " .. M.icons.review_h, cols.review, "PlzHeader" },
     { " " .. M.icons.ci, cols.ci, "PlzHeader" },
