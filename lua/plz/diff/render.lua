@@ -33,6 +33,9 @@ function M.apply(lhs_buf, rhs_buf, diff_result, padded_lhs, padded_rhs)
   for _, hunk in ipairs(diff_result.hunks or {}) do
     for _, entry in ipairs(hunk.entries) do
       if entry.type == "change" then
+        -- Two-level: subtle line bg + bold novel tokens (matches difftastic terminal)
+        M._highlight_line(lhs_buf, lhs_map[entry.lhs_line], "PlzDiffRemoveLine")
+        M._highlight_line(rhs_buf, rhs_map[entry.rhs_line], "PlzDiffAddLine")
         M._highlight_changes(lhs_buf, lhs_map[entry.lhs_line], entry.lhs_changes, "PlzDiffRemove")
         M._highlight_changes(rhs_buf, rhs_map[entry.rhs_line], entry.rhs_changes, "PlzDiffAdd")
       elseif entry.type == "add" then
@@ -42,6 +45,27 @@ function M.apply(lhs_buf, rhs_buf, diff_result, padded_lhs, padded_rhs)
       end
     end
   end
+end
+
+--- Apply a subtle full-line highlight (background) for changed lines.
+--- @param buf number Buffer handle
+--- @param row number|nil 0-indexed buffer row
+--- @param hl_group string Highlight group name (e.g. PlzDiffAddLine)
+function M._highlight_line(buf, row, hl_group)
+  if not row then return end
+  local line_count = vim.api.nvim_buf_line_count(buf)
+  if row < 0 or row >= line_count then return end
+
+  -- Line number color matches the line-level group
+  layout.set_line_hl(buf, row + 1, hl_group)
+
+  -- Full-line background at lower priority so token highlights show on top
+  vim.api.nvim_buf_set_extmark(buf, ns, row, 0, {
+    end_row = row + 1,
+    hl_group = hl_group,
+    hl_eol = true,
+    priority = 50,
+  })
 end
 
 --- Highlight specific token positions within a line and color its line number.
@@ -61,15 +85,26 @@ function M._highlight_changes(buf, row, changes, hl_group)
   -- Color the line number in the statuscolumn
   layout.set_line_hl(buf, row + 1, hl_group) -- row+1 because statuscolumn uses 1-indexed lnum
 
-  for _, change in ipairs(changes or {}) do
-    local start_col = math.min(change.start, line_len)
-    local end_col = math.min(change.end_col, line_len)
-    if start_col < end_col then
-      vim.api.nvim_buf_set_extmark(buf, ns, row, start_col, {
-        end_col = end_col,
+  if not changes or #changes == 0 then
+    -- No token-level positions (e.g. entirely new/deleted file) — highlight full line
+    if line_len > 0 then
+      vim.api.nvim_buf_set_extmark(buf, ns, row, 0, {
+        end_col = line_len,
         hl_group = hl_group,
         priority = 100,
       })
+    end
+  else
+    for _, change in ipairs(changes) do
+      local start_col = math.min(change.start, line_len)
+      local end_col = math.min(change.end_col, line_len)
+      if start_col < end_col then
+        vim.api.nvim_buf_set_extmark(buf, ns, row, start_col, {
+          end_col = end_col,
+          hl_group = hl_group,
+          priority = 100,
+        })
+      end
     end
   end
 end

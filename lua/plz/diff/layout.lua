@@ -90,7 +90,7 @@ function M.side_by_side(padded_lhs, padded_rhs, opts)
     vim.wo[win].relativenumber = false
     vim.wo[win].signcolumn = "no"
     vim.wo[win].wrap = false
-    vim.wo[win].foldcolumn = "0"
+    vim.wo[win].foldcolumn = "1"
     vim.wo[win].statuscolumn = "%{%v:lua.PlzDiffLineNr()%}"
   end
 

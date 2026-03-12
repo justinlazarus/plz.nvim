@@ -13,9 +13,7 @@ local state = {
   tab_idx = 1,
   prs = {},
   list_buf = nil,
-  preview_buf = nil,
   list_win = nil,
-  preview_win = nil,
   autocmd_id = nil,
   ado_cache = {}, -- keyed by work item ID
   prev_buf = nil, -- buffer to restore on close
@@ -24,7 +22,6 @@ local state = {
   filter_buf = nil, -- 1-line scratch buffer for filter editing
 }
 
---- Compute title column width based on window width.
 --- Compute column layout for the current window width.
 local function get_cols()
   local win_w = 90
@@ -85,14 +82,11 @@ function M._write_header()
   lines[6] = border
   all_regions[6] = { { 0, #border, "PlzBorder" } }
 
-  -- Replace only the first 4 lines
   vim.bo[state.list_buf].modifiable = true
   local total = vim.api.nvim_buf_line_count(state.list_buf)
   if total < HEADER_LINES then
-    -- Buffer is fresh/empty — write header + empty body
     vim.api.nvim_buf_set_lines(state.list_buf, 0, -1, false, lines)
   else
-    -- Only replace header lines, keep body intact
     vim.api.nvim_buf_set_lines(state.list_buf, 0, HEADER_LINES, false, lines)
   end
   vim.bo[state.list_buf].modifiable = false
@@ -113,39 +107,19 @@ function M.open()
   vim.bo[state.list_buf].bufhidden = "wipe"
   vim.bo[state.list_buf].filetype = "plz-dashboard"
 
-  state.preview_buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[state.preview_buf].buftype = "nofile"
-  vim.bo[state.preview_buf].bufhidden = "wipe"
-
-  -- List window (top)
+  -- Take over current window
   state.list_win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(state.list_win, state.list_buf)
 
-  -- Preview window (bottom)
-  vim.cmd("botright split")
-  state.preview_win = vim.api.nvim_get_current_win()
-  vim.api.nvim_win_set_buf(state.preview_win, state.preview_buf)
-  vim.api.nvim_win_set_height(state.preview_win, 12)
-
-  vim.api.nvim_set_current_win(state.list_win)
-
-  for _, win in ipairs({ state.list_win, state.preview_win }) do
-    vim.wo[win].number = false
-    vim.wo[win].relativenumber = false
-    vim.wo[win].signcolumn = "no"
-    vim.wo[win].wrap = false
-    vim.wo[win].foldcolumn = "0"
-    vim.wo[win].statuscolumn = ""
-  end
+  vim.wo[state.list_win].number = false
+  vim.wo[state.list_win].relativenumber = false
+  vim.wo[state.list_win].signcolumn = "no"
+  vim.wo[state.list_win].wrap = false
+  vim.wo[state.list_win].foldcolumn = "0"
+  vim.wo[state.list_win].statuscolumn = ""
   vim.wo[state.list_win].cursorline = true
-  vim.wo[state.preview_win].cursorline = false
 
   M._setup_keymaps()
-
-  state.autocmd_id = vim.api.nvim_create_autocmd("CursorMoved", {
-    buffer = state.list_buf,
-    callback = function() M._update_preview() end,
-  })
 
   M._fetch_tab(state.tab_idx)
 end
@@ -160,7 +134,6 @@ function M._fetch_tab(idx)
 
   -- Replace body (lines below header) with "Loading..."
   set_buf_lines_from(state.list_buf, HEADER_LINES, { "", "  Loading..." })
-  set_buf_lines(state.preview_buf, {})
 
   fetch.fetch_section(idx, function(prs, err)
     if err then
@@ -170,7 +143,6 @@ function M._fetch_tab(idx)
     state.prs = prs or {}
     M._render_rows()
     M._fetch_ado_batch()
-    M._update_preview()
   end)
 end
 
@@ -228,51 +200,6 @@ function M._render_rows()
   end
 end
 
---- Update the preview pane for the currently selected PR.
-function M._update_preview()
-  if not state.preview_buf or not vim.api.nvim_buf_is_valid(state.preview_buf) then return end
-  if not state.list_win or not vim.api.nvim_win_is_valid(state.list_win) then return end
-
-  local cursor = vim.api.nvim_win_get_cursor(state.list_win)
-  local pr_idx = cursor[1] - HEADER_LINES
-  local pr = state.prs[pr_idx]
-
-  -- Check for ADO work item and fetch if needed
-  local ado_item = nil
-  if pr then
-    local ado_id = ado.extract_id(pr.title or "") or ado.extract_id(pr.body or "")
-    if ado_id then
-      if state.ado_cache[ado_id] then
-        ado_item = state.ado_cache[ado_id]
-      else
-        ado.fetch_work_item(ado_id, function(item, _err)
-          if item then
-            state.ado_cache[ado_id] = item
-            M._update_preview()
-          end
-        end)
-      end
-    end
-  end
-
-  local preview_lines, line_regions = render.format_preview(pr, ado_item)
-  set_buf_lines(state.preview_buf, preview_lines)
-
-  local preview_ns = vim.api.nvim_create_namespace("plz_dashboard_preview")
-  vim.api.nvim_buf_clear_namespace(state.preview_buf, preview_ns, 0, -1)
-  for i, regions in ipairs(line_regions) do
-    for _, r in ipairs(regions) do
-      if r[3] then
-        pcall(vim.api.nvim_buf_set_extmark, state.preview_buf, preview_ns, i - 1, r[1], {
-          end_col = r[2],
-          hl_group = r[3],
-          priority = 100,
-        })
-      end
-    end
-  end
-end
-
 --- Set up dashboard keybindings.
 function M._setup_keymaps()
   local buf = state.list_buf
@@ -314,26 +241,26 @@ function M._setup_keymaps()
   vim.keymap.set("n", "<CR>", function()
     local pr = M._get_selected_pr()
     if pr then
-      vim.notify("plz: PR #" .. pr.number .. " review — not yet implemented", vim.log.levels.INFO)
+      local review = require("plz.review")
+      review.open(pr)
     end
   end, vim.tbl_extend("force", opts, { desc = "Open PR review" }))
 
   vim.keymap.set("n", "?", function()
-    local help = {
-      "  plz dashboard",
+    vim.notify(table.concat({
+      "plz dashboard",
       "",
-      "  j/k       navigate",
-      "  <CR>      open PR for review",
-      "  o         open in browser",
-      "  r         refresh",
-      "  /         edit filter",
-      "  1-" .. #fetch.sections .. "       switch tab",
-      "  <Tab>     next tab",
-      "  <S-Tab>   previous tab",
-      "  q         close",
-      "  ?         this help",
-    }
-    set_buf_lines(state.preview_buf, help)
+      "j/k       navigate",
+      "<CR>      open PR for review",
+      "o         open in browser",
+      "r         refresh",
+      "/         edit filter",
+      "1-" .. #fetch.sections .. "       switch tab",
+      "<Tab>     next tab",
+      "<S-Tab>   previous tab",
+      "q         close",
+      "?         this help",
+    }, "\n"), vim.log.levels.INFO)
   end, vim.tbl_extend("force", opts, { desc = "Show help" }))
 end
 
@@ -356,7 +283,7 @@ function M._edit_filter()
   vim.bo[state.filter_buf].buftype = "nofile"
   vim.bo[state.filter_buf].bufhidden = "wipe"
 
-  -- Open as a floating window over the filter line (row 1, 0-indexed)
+  -- Open as a floating window over the filter line (row 2, 0-indexed)
   local filter_win = vim.api.nvim_open_win(state.filter_buf, true, {
     relative = "win",
     win = state.list_win,
@@ -410,7 +337,6 @@ function M._fetch_tab_with_filter(idx)
 
   M._write_header()
   set_buf_lines_from(state.list_buf, HEADER_LINES, { "", "  Loading..." })
-  set_buf_lines(state.preview_buf, {})
 
   local filter = M._get_filter()
   local args = fetch.args_from_filter(filter)
@@ -423,7 +349,6 @@ function M._fetch_tab_with_filter(idx)
     state.prs = prs or {}
     M._render_rows()
     M._fetch_ado_batch()
-    M._update_preview()
   end)
 end
 
@@ -441,25 +366,18 @@ function M.close()
     state.autocmd_id = nil
   end
 
-  if state.preview_win and vim.api.nvim_win_is_valid(state.preview_win) then
-    pcall(vim.api.nvim_win_close, state.preview_win, true)
-  end
-
   if state.prev_buf and vim.api.nvim_buf_is_valid(state.prev_buf) then
     if state.list_win and vim.api.nvim_win_is_valid(state.list_win) then
       vim.api.nvim_win_set_buf(state.list_win, state.prev_buf)
     end
   end
 
-  for _, buf in ipairs({ state.list_buf, state.preview_buf }) do
-    if buf and vim.api.nvim_buf_is_valid(buf) then
-      pcall(vim.api.nvim_buf_delete, buf, { force = true })
-    end
+  if state.list_buf and vim.api.nvim_buf_is_valid(state.list_buf) then
+    pcall(vim.api.nvim_buf_delete, state.list_buf, { force = true })
   end
+
   state.list_buf = nil
-  state.preview_buf = nil
   state.list_win = nil
-  state.preview_win = nil
   state.prev_buf = nil
   state.prs = {}
 end

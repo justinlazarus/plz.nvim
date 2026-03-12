@@ -15,7 +15,11 @@ function M.setup(opts)
   M._did_setup = true
   M.config = vim.tbl_deep_extend("force", M.config, opts or {})
 
-  -- Diff highlights — fg only, matching difftastic terminal style
+  -- Diff highlights — two levels matching difftastic terminal style
+  -- Line-level: subtle fg for the whole changed line
+  vim.api.nvim_set_hl(0, "PlzDiffAddLine", { fg = "#6e9670", default = true })
+  vim.api.nvim_set_hl(0, "PlzDiffRemoveLine", { fg = "#9e6a74", default = true })
+  -- Token-level: bold fg for the actual novel tokens
   vim.api.nvim_set_hl(0, "PlzDiffAdd", { fg = "#a6e3a1", bold = true, default = true })
   vim.api.nvim_set_hl(0, "PlzDiffRemove", { fg = "#f38ba8", bold = true, default = true })
 
@@ -32,6 +36,10 @@ function M.setup(opts)
   vim.api.nvim_set_hl(0, "PlzTabActive", { fg = "#ABB2BF", bold = true, default = true })
   vim.api.nvim_set_hl(0, "PlzTabInactive", { fg = "#656C76", default = true })
   vim.api.nvim_set_hl(0, "PlzBorder", { fg = "#3E4452", default = true })
+  vim.api.nvim_set_hl(0, "PlzFold", { fg = "#3E4452", italic = true, default = true })
+  vim.api.nvim_set_hl(0, "PlzGreen", { fg = "#3DF294", default = true })
+  vim.api.nvim_set_hl(0, "PlzRed", { fg = "#E06C75", default = true })
+  vim.api.nvim_set_hl(0, "PlzYellow", { fg = "#E5C07B", default = true })
   vim.api.nvim_set_hl(0, "PlzHeader", { fg = "#656C76", default = true })
   vim.api.nvim_set_hl(0, "PlzPill", { fg = "#ABB2BF", bg = "#3E4452", default = true })
 

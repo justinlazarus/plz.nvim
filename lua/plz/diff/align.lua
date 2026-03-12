@@ -92,4 +92,74 @@ function M._fill_gap(p_lhs, p_rhs, old_lines, new_lines,
   end
 end
 
+--- Collapse unchanged regions, keeping only lines near changes.
+--- Replaces gaps with fold separator entries.
+--- @param padded_lhs table[] Aligned LHS from build()
+--- @param padded_rhs table[] Aligned RHS from build()
+--- @param diff_result table Normalized difftastic output
+--- @param context number Lines of context around each change (default 3)
+--- @return table[] collapsed_lhs
+--- @return table[] collapsed_rhs
+function M.collapse(padded_lhs, padded_rhs, diff_result, context)
+  context = context or 3
+  local n = #padded_lhs
+
+  if n == 0 then return padded_lhs, padded_rhs end
+
+  -- Build orig → padded-index maps
+  local lhs_map = {}
+  for i, entry in ipairs(padded_lhs) do
+    if entry.orig ~= nil then lhs_map[entry.orig] = i end
+  end
+  local rhs_map = {}
+  for i, entry in ipairs(padded_rhs) do
+    if entry.orig ~= nil then rhs_map[entry.orig] = i end
+  end
+
+  -- Mark padded rows that are changed
+  local changed = {}
+  for _, hunk in ipairs(diff_result.hunks or {}) do
+    for _, entry in ipairs(hunk.entries) do
+      if entry.lhs_line and lhs_map[entry.lhs_line] then
+        changed[lhs_map[entry.lhs_line]] = true
+      end
+      if entry.rhs_line and rhs_map[entry.rhs_line] then
+        changed[rhs_map[entry.rhs_line]] = true
+      end
+    end
+  end
+
+  -- Expand to include context lines
+  local visible = {}
+  for row in pairs(changed) do
+    for i = math.max(1, row - context), math.min(n, row + context) do
+      visible[i] = true
+    end
+  end
+
+  -- Build collapsed arrays
+  local col_lhs = {}
+  local col_rhs = {}
+  local i = 1
+  while i <= n do
+    if visible[i] then
+      table.insert(col_lhs, padded_lhs[i])
+      table.insert(col_rhs, padded_rhs[i])
+      i = i + 1
+    else
+      -- Count consecutive hidden lines
+      local start = i
+      while i <= n and not visible[i] do
+        i = i + 1
+      end
+      local hidden = i - start
+      local fold_text = string.format("╶╶╶ %d lines ╶╶╶", hidden)
+      table.insert(col_lhs, { text = fold_text, orig = nil, fold = true, hidden = hidden })
+      table.insert(col_rhs, { text = fold_text, orig = nil, fold = true, hidden = hidden })
+    end
+  end
+
+  return col_lhs, col_rhs
+end
+
 return M

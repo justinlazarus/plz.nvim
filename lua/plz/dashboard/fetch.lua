@@ -7,6 +7,7 @@ local PR_FIELDS = table.concat({
   "statusCheckRollup", "additions", "deletions",
   "updatedAt", "createdAt", "headRefName", "baseRefName",
   "isDraft", "url", "body", "changedFiles", "state", "comments", "reviews",
+  "headRefOid", "baseRefOid",
 }, ",")
 
 --- Section definitions — each tab in the dashboard.
