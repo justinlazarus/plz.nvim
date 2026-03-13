@@ -192,7 +192,8 @@ function M.format_row(pr, cols, ado_item)
   -- ADO column (icon only)
   local ado_str = ""
   local ado_hl = nil
-  local ab_id = ((pr.title or ""):match("AB#(%d+)") or (pr.body or ""):match("AB#(%d+)"))
+  local body = (pr.body or ""):gsub("<!%-%-.-%-%->", "")
+  local ab_id = ((pr.title or ""):match("AB#(%d+)") or body:match("AB#(%d+)"))
   if ab_id and ado_item and not ado_item.not_found then
     local ado_type = ado_item.type or ""
     ado_str = ado_type == "Bug" and M.icons.ado_bug
@@ -208,10 +209,6 @@ function M.format_row(pr, cols, ado_item)
     else
       ado_hl = "PlzFaint"
     end
-  elseif ab_id and ado_item and ado_item.not_found then
-    -- AB# reference but work item doesn't exist
-    ado_str = M.icons.ado_none
-    ado_hl = "PlzError"
   elseif ab_id then
     ado_str = M.icons.dot
     ado_hl = "PlzFaint"         -- loading placeholder

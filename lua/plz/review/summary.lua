@@ -423,7 +423,8 @@ end
 --- @return string line
 --- @return table[] hl_regions
 function M.build_ado_line(pr)
-  local ab_id = ((pr.title or ""):match("AB#(%d+)") or (pr.body or ""):match("AB#(%d+)"))
+  local body = (pr.body or ""):gsub("<!%-%-.-%-%->", "")
+  local ab_id = ((pr.title or ""):match("AB#(%d+)") or body:match("AB#(%d+)"))
   if not ab_id then
     return "", {}
   end

@@ -200,7 +200,8 @@ end
 --- Batch-fetch ADO work items for all PRs that have AB# references.
 function M._fetch_ado_batch()
   for _, pr in ipairs(state.prs) do
-    local ab_id = ((pr.title or ""):match("AB#(%d+)") or (pr.body or ""):match("AB#(%d+)"))
+    local body = (pr.body or ""):gsub("<!%-%-.-%-%->", "")
+    local ab_id = ((pr.title or ""):match("AB#(%d+)") or body:match("AB#(%d+)"))
     if ab_id and not state.ado_cache[ab_id] then
       ado.fetch_work_item(ab_id, function(item, _err)
         if item then
@@ -229,7 +230,8 @@ function M._render_rows()
     all_regions[2] = { { 0, #lines[2], "PlzFaint" } }
   else
     for _, pr in ipairs(state.prs) do
-      local ab_id = ((pr.title or ""):match("AB#(%d+)") or (pr.body or ""):match("AB#(%d+)"))
+      local body = (pr.body or ""):gsub("<!%-%-.-%-%->", "")
+    local ab_id = ((pr.title or ""):match("AB#(%d+)") or body:match("AB#(%d+)"))
       local ado_item = ab_id and state.ado_cache[ab_id] or nil
       local row_text, row_regions = render.format_row(pr, cols, ado_item)
       table.insert(lines, row_text)
