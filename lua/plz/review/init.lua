@@ -498,6 +498,23 @@ function M._setup_keymaps()
       M.close()
     end, vim.tbl_extend("force", rt_opts, { desc = "Close review" }))
   end
+
+  -- Help keymap on all collection buffers (C3 is set in change_detail)
+  local help_bufs = {}
+  if c1 then
+    if c1.top_buf then table.insert(help_bufs, c1.top_buf) end
+    if c1.bottom_buf then table.insert(help_bufs, c1.bottom_buf) end
+  end
+  if c2 then
+    if c2.top_buf then table.insert(help_bufs, c2.top_buf) end
+    if c2.bottom_buf then table.insert(help_bufs, c2.bottom_buf) end
+  end
+  for _, buf in ipairs(help_bufs) do
+    vim.keymap.set("n", "?", function()
+      local help = change_detail._help_lines
+      if help then require("plz.help").toggle(help) end
+    end, { buffer = buf, nowait = true, desc = "Toggle help" })
+  end
 end
 
 --- Delegate: create diff split.

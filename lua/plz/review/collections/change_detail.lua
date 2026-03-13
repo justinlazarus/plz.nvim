@@ -498,23 +498,40 @@ function M.setup_file_keymaps(review)
   local help_lines = {
     "plz review",
     "",
-    "<Tab>     next collection (Info+Commits → Reviews → Files+Diff)",
-    "<S-Tab>   previous collection",
-    "1/2/3     jump to collection",
-    "<CR>      open diff / select commit (in commits view)",
-    "j/k       navigate files",
-    "v         toggle file viewed",
-    "c         toggle comment at cursor (in diff view)",
-    "]c / [c   next/prev comment (in diff view)",
-    "]f / [f   next/prev file (in diff view)",
-    "]h / [h   next/prev hunk (in diff view)",
-    "<BS>/q    back (commit mode → PR, diff → files, files → close)",
-    "o         open PR files in browser",
-    "?         toggle this help",
+    "Navigation",
+    "  <Tab>/<S-Tab>   cycle collections",
+    "  1/2/3           jump to collection",
+    "  <C-w><C-w>      switch focus between top/bottom panes",
+    "",
+    "C1 — PR Detail (info + description / commits)",
+    "  <CR>            select commit → enter commit mode (in commits)",
+    "  <BS>            exit commit mode → return to PR",
+    "  o               open PR in browser",
+    "",
+    "C2 — Reviews (review list / threads)",
+    "  <CR>            select review → show threads below",
+    "  o               open review in browser",
+    "",
+    "C3 — Changes (file list / diff)",
+    "  <CR>            open diff for selected file",
+    "  ]f / [f         next/prev file (in diff)",
+    "  ]h / [h         next/prev hunk (in diff)",
+    "  ]c / [c         next/prev comment (in diff)",
+    "  c               toggle comment at cursor (in diff)",
+    "  v               toggle file viewed",
+    "  o               open PR files in browser",
+    "",
+    "General",
+    "  q               close (diff → file list → exit review)",
+    "  <BS>            back (commit mode → PR view)",
+    "  ?               toggle this help",
   }
   vim.keymap.set("n", "?", function()
     require("plz.help").toggle(help_lines)
   end, vim.tbl_extend("force", opts, { desc = "Toggle help" }))
+
+  -- Store help_lines so other collections can reuse
+  M._help_lines = help_lines
 end
 
 return M
