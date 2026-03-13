@@ -18,6 +18,7 @@ local state = {
   ado_cache = {}, -- keyed by work item ID
   prev_buf = nil, -- buffer to restore on close
   filter_overrides = {}, -- per-tab session filter overrides
+  repo_name = nil, -- "owner/repo" fetched on open
   editing_filter = false,
   filter_buf = nil, -- 1-line scratch buffer for filter editing
   fetch_gen = 0, -- generation counter to ignore stale fetch callbacks
@@ -101,6 +102,18 @@ function M._write_header()
   end
 end
 
+--- Update the statusline on the dashboard window.
+function M._update_statusline()
+  if not state.list_win or not vim.api.nvim_win_is_valid(state.list_win) then return end
+  local repo = state.repo_name or ""
+  local stl = "%#PlzStatusLine# \xf3\xb0\x90\x87"
+  if repo ~= "" then
+    stl = stl .. " %#PlzStatusFaint#" .. repo:gsub("%%", "%%%%")
+  end
+  stl = stl .. "%="
+  vim.wo[state.list_win].statusline = stl
+end
+
 --- Open the plz dashboard.
 function M.open()
   state.prev_buf = vim.api.nvim_get_current_buf()
@@ -121,10 +134,33 @@ function M.open()
   vim.wo[state.list_win].foldcolumn = "0"
   vim.wo[state.list_win].statuscolumn = ""
   vim.wo[state.list_win].cursorline = true
+  M._update_statusline()
 
   M._setup_keymaps()
 
   M._fetch_tab(state.tab_idx)
+  M._fetch_repo_name()
+end
+
+--- Fetch the repository name for the statusline.
+function M._fetch_repo_name()
+  if state.repo_name then
+    M._update_statusline()
+    return
+  end
+  -- Use git remote to avoid extra gh API call
+  vim.system({ "git", "remote", "get-url", "origin" }, { text = true }, function(obj)
+    vim.schedule(function()
+      if obj.code == 0 and obj.stdout then
+        -- Parse owner/repo from remote URL
+        local owner, repo = obj.stdout:match("github%.com[:/]([^/]+)/([^/%.%s]+)")
+        if owner and repo then
+          state.repo_name = owner .. "/" .. repo
+        end
+      end
+      M._update_statusline()
+    end)
+  end)
 end
 
 --- Fetch and display PRs for the given tab, respecting any filter override.
@@ -363,7 +399,8 @@ function M._fetch_tab_with_filter(idx, limit)
   gh.run(args, function(prs, err)
     if gen ~= state.fetch_gen then return end -- stale callback
     if err then
-      set_buf_lines_from(state.list_buf, HEADER_LINES, { "", "  Error: " .. err })
+      local err_msg = err:gsub("\n", " ")
+      set_buf_lines_from(state.list_buf, HEADER_LINES, { "", "  Error: " .. err_msg })
       return
     end
     state.prs = prs or {}

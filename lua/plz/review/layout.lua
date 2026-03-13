@@ -9,6 +9,20 @@ function M.setup(state_ref)
   state = state_ref
 end
 
+--- Build the plz statusline string, including repo name if available.
+function M.plz_statusline()
+  local repo = ""
+  if state and state.pr and state.pr.url then
+    local owner, name = state.pr.url:match("github%.com/([^/]+)/([^/]+)")
+    if owner and name then repo = owner .. "/" .. name end
+  end
+  local stl = "%#PlzStatusLine# \xf3\xb0\x90\x87"
+  if repo ~= "" then
+    stl = stl .. " %#PlzStatusFaint#" .. repo:gsub("%%", "%%%%")
+  end
+  return stl .. "%="
+end
+
 --- Standard window options for non-interactive panels.
 local no_interact = {
   number = false, relativenumber = false, signcolumn = "no",
@@ -24,6 +38,7 @@ local interactive = {
 --- Apply a table of window options to a window.
 local function set_win_opts(win, opts)
   for k, v in pairs(opts) do vim.wo[win][k] = v end
+  vim.wo[win].statusline = M.plz_statusline()
 end
 
 --- Set collection-switching keymaps on a buffer.
@@ -79,21 +94,25 @@ function M.create_initial()
   local c1_top = vim.api.nvim_create_buf(false, true)
   vim.bo[c1_top].buftype = "nofile"
   vim.bo[c1_top].bufhidden = "hide"
+  vim.bo[c1_top].filetype = "plz-review"
 
   -- C1 bottom: commits
   local c1_bot = vim.api.nvim_create_buf(false, true)
   vim.bo[c1_bot].buftype = "nofile"
   vim.bo[c1_bot].bufhidden = "hide"
+  vim.bo[c1_bot].filetype = "plz-review"
 
   -- C2 top: review list
   local c2_top = vim.api.nvim_create_buf(false, true)
   vim.bo[c2_top].buftype = "nofile"
   vim.bo[c2_top].bufhidden = "hide"
+  vim.bo[c2_top].filetype = "plz-review"
 
   -- C2 bottom: review threads
   local c2_bot = vim.api.nvim_create_buf(false, true)
   vim.bo[c2_bot].buftype = "nofile"
   vim.bo[c2_bot].bufhidden = "hide"
+  vim.bo[c2_bot].filetype = "plz-review"
 
   -- C3 top: file list
   local c3_top = files.create_buf()

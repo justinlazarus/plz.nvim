@@ -115,6 +115,7 @@ function M.populate_diff(data)
   vim.bo[lhs_buf].modifiable = false
   vim.bo[lhs_buf].buftype = "nofile"
   vim.bo[lhs_buf].bufhidden = "wipe"
+  vim.bo[lhs_buf].filetype = "plz-diff"
   layout_mod._line_nums[lhs_buf] = lhs_nums
 
   -- Create RHS buffer
@@ -123,6 +124,7 @@ function M.populate_diff(data)
   vim.bo[rhs_buf].modifiable = false
   vim.bo[rhs_buf].buftype = "nofile"
   vim.bo[rhs_buf].bufhidden = "wipe"
+  vim.bo[rhs_buf].filetype = "plz-diff"
   layout_mod._line_nums[rhs_buf] = rhs_nums
 
   -- Set NEW buffers in windows FIRST (keeps windows alive)
@@ -142,6 +144,7 @@ function M.populate_diff(data)
     vim.wo[win].wrap = false
     vim.wo[win].foldcolumn = "1"
     vim.wo[win].statuscolumn = "%{%v:lua.PlzDiffLineNr()%}"
+    vim.wo[win].statusline = layout.plz_statusline()
   end
   vim.cmd("syncbind")
 

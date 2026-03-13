@@ -53,6 +53,9 @@ function M.setup(opts)
   vim.api.nvim_set_hl(0, "PlzLink", { fg = "#42A0FA", underline = true, default = true })
   vim.api.nvim_set_hl(0, "PlzBold", { bold = true, default = true })
   vim.api.nvim_set_hl(0, "PlzItalic", { italic = true, default = true })
+  local normal_bg = vim.api.nvim_get_hl(0, { name = "Normal" }).bg
+  vim.api.nvim_set_hl(0, "PlzStatusLine", { fg = "#42A0FA", bg = normal_bg, default = true })
+  vim.api.nvim_set_hl(0, "PlzStatusFaint", { fg = "#656C76", bg = normal_bg, default = true })
 
   -- Non-diff highlights — link to existing groups
   local highlights = {
@@ -70,6 +73,54 @@ function M.setup(opts)
   for group, link in pairs(highlights) do
     vim.api.nvim_set_hl(0, group, { link = link, default = true })
   end
+
+  -- Plz statusline: disable statusline plugins while in plz buffers.
+  -- Works universally by temporarily hiding lualine/etc. via their
+  -- hide() API, falling back to a timer-based override.
+  local plz_stl = "%#PlzStatusLine# \xf3\xb0\x90\x87%="
+  local stl_hidden = false
+
+  local saved_laststatus
+
+  local function show_plz_stl()
+    if not stl_hidden then
+      saved_laststatus = vim.o.laststatus
+      -- Try lualine hide API (works for lualine; no-op if absent)
+      local ok, lualine = pcall(require, "lualine")
+      if ok and lualine.hide then
+        pcall(lualine.hide)
+      end
+      stl_hidden = true
+    end
+    vim.o.laststatus = saved_laststatus or 2
+    vim.wo.statusline = plz_stl
+  end
+
+  local function restore_stl()
+    if stl_hidden then
+      local ok, lualine = pcall(require, "lualine")
+      if ok and lualine.hide then
+        pcall(lualine.hide, { unhide = true })
+      end
+      stl_hidden = false
+    end
+  end
+
+  vim.api.nvim_create_autocmd({ "BufEnter", "WinEnter" }, {
+    callback = function()
+      local ft = vim.bo.filetype or ""
+      if ft:match("^plz") then
+        show_plz_stl()
+        -- Re-apply dashboard statusline with repo name
+        if ft == "plz-dashboard" then
+          local ok, dash = pcall(require, "plz.dashboard")
+          if ok and dash._update_statusline then dash._update_statusline() end
+        end
+      else
+        restore_stl()
+      end
+    end,
+  })
 end
 
 return M
