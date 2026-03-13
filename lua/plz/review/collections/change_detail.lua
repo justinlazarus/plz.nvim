@@ -187,8 +187,13 @@ function M.populate_diff(data)
   layout.resize_top_to_content()
 
   -- Show comment indicators
-  state.expanded_comments = {}
+  if not state._jump_comment_direction then
+    state.expanded_comments = {}
+  end
   comments.show_comment_indicators()
+
+  -- Continue cross-file comment jump if pending
+  comments.continue_jump_after_load()
 
   state._suppress_diff_focus = nil
 end
@@ -222,8 +227,9 @@ function M.setup_diff_keymaps(diff_state)
       end, { buffer = buf, desc = "Previous file" })
 
       vim.keymap.set("n", "q", function()
-        M.close_diff()
-      end, { buffer = buf, desc = "Close diff" })
+        local review = require("plz.review")
+        review.close()
+      end, { buffer = buf, desc = "Close review" })
 
       vim.keymap.set("n", "v", function()
         if state.current_file_idx then
@@ -524,6 +530,14 @@ function M.setup_file_keymaps(review)
     end
   end, vim.tbl_extend("force", opts, { desc = "Toggle viewed" }))
 
+  vim.keymap.set("n", "]c", function()
+    comments.jump_comment(1)
+  end, vim.tbl_extend("force", opts, { desc = "Next comment" }))
+
+  vim.keymap.set("n", "[c", function()
+    comments.jump_comment(-1)
+  end, vim.tbl_extend("force", opts, { desc = "Previous comment" }))
+
   local help_lines = {
     "plz review",
     "",
@@ -545,7 +559,7 @@ function M.setup_file_keymaps(review)
     "  <CR>            open diff for selected file",
     "  ]f / [f         next/prev file (in diff)",
     "  ]h / [h         next/prev hunk (in diff)",
-    "  ]c / [c         next/prev comment (in diff)",
+    "  ]c / [c         next/prev comment (cross-file)",
     "  c               toggle comment at cursor (in diff)",
     "  v               toggle file viewed",
     "  o               open PR files in browser",

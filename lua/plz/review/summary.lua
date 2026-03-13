@@ -447,8 +447,8 @@ function M.build_ado_line(pr)
     -- Re-render detail view if C1 is active
     if state.active_collection == 1 then
       local c = state.collections and state.collections[1]
-      if c and c.top_buf and vim.api.nvim_buf_is_valid(c.top_buf) then
-        M.render_detail_to(c.top_buf, state.top_win)
+      if c and c.bottom_buf and vim.api.nvim_buf_is_valid(c.bottom_buf) then
+        M.render_detail_to(c.bottom_buf, state.bottom_win)
       end
     end
   end)

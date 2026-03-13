@@ -105,6 +105,28 @@ function M.file_comment_count(path)
   return count
 end
 
+--- Re-sync diff scroll positions after virtual lines change.
+--- Centers current cursor and forces both windows to the same topline.
+function M._resync_scroll()
+  local lhs_win = state.diff_lhs_win
+  local rhs_win = state.diff_rhs_win
+  if not lhs_win or not vim.api.nvim_win_is_valid(lhs_win) then return end
+  if not rhs_win or not vim.api.nvim_win_is_valid(rhs_win) then return end
+
+  -- Get the current window (where cursor is)
+  local cur_win = vim.api.nvim_get_current_win()
+  local other_win = cur_win == rhs_win and lhs_win or rhs_win
+
+  -- Center cursor in current window
+  vim.api.nvim_win_call(cur_win, function() vim.cmd("normal! zz") end)
+
+  -- Read topline from current window and apply to other
+  local topline = vim.fn.getwininfo(cur_win)[1].topline
+  vim.api.nvim_win_call(other_win, function()
+    vim.fn.winrestview({ topline = topline })
+  end)
+end
+
 --- Show comment indicators (badges) on diff lines that have comments.
 function M.show_comment_indicators()
   if not state.current_file_idx then return end
@@ -343,32 +365,50 @@ function M.toggle_comment_at_cursor()
 
   -- Re-render all indicators (clears and re-applies)
   M.show_comment_indicators()
+  M._resync_scroll()
 end
 
---- Jump to the next or previous commented line in the current diff.
---- @param direction number 1 for next, -1 for previous
-function M.jump_comment(direction)
-  local win = vim.api.nvim_get_current_win()
-  local buf = vim.api.nvim_win_get_buf(win)
-  local cursor_line = vim.api.nvim_win_get_cursor(win)[1]
+--- Check if a file has any comments (either side).
+--- @param file_idx number
+--- @return boolean
+local function file_has_comments(file_idx)
+  local file = state.files[file_idx]
+  if not file then return false end
+  local path = file.filename or file.path or ""
+  local rhs = state.comments_by_file[path]
+  local lhs = state.comments_by_file_left[path]
+  return (rhs and not vim.tbl_isempty(rhs)) or (lhs and not vim.tbl_isempty(lhs))
+end
 
-  if buf ~= state.diff_lhs_buf and buf ~= state.diff_rhs_buf then return end
-  if not state.current_file_idx then return end
+--- Build sorted list of commented buffer lines for the current diff.
+--- @return number[] commented_lines, string side, number buf
+local function get_commented_lines_in_diff()
+  if not state.diff_rhs_buf or not vim.api.nvim_buf_is_valid(state.diff_rhs_buf) then
+    return {}, "RIGHT", 0
+  end
+  if not state.current_file_idx then return {}, "RIGHT", 0 end
 
   local file = state.files[state.current_file_idx]
-  if not file then return end
+  if not file then return {}, "RIGHT", 0 end
   local path = file.filename or file.path or ""
 
-  local side = buf == state.diff_rhs_buf and "RIGHT" or "LEFT"
-  local map = side == "LEFT" and state.comments_by_file_left or state.comments_by_file
+  local layout_mod = require("plz.diff.layout")
+
+  -- Prefer RHS comments, fall back to LHS
+  local side = "RIGHT"
+  local buf = state.diff_rhs_buf
+  local map = state.comments_by_file
   local file_comments = map[path] or {}
+
   if vim.tbl_isempty(file_comments) then
-    vim.notify("plz: no comments in this file", vim.log.levels.INFO)
-    return
+    side = "LEFT"
+    buf = state.diff_lhs_buf
+    map = state.comments_by_file_left
+    file_comments = map[path] or {}
   end
 
-  -- Build sorted list of buffer lines that have comments
-  local layout_mod = require("plz.diff.layout")
+  if vim.tbl_isempty(file_comments) then return {}, side, buf end
+
   local line_nums = layout_mod._line_nums[buf] or {}
   local commented_lines = {}
   for buf_line, orig_line in pairs(line_nums) do
@@ -377,36 +417,108 @@ function M.jump_comment(direction)
     end
   end
   table.sort(commented_lines)
+  return commented_lines, side, buf
+end
 
+--- Jump to the next or previous comment, crossing file boundaries.
+--- Works from either the file list buffer or a diff buffer.
+--- @param direction number 1 for next, -1 for previous
+function M.jump_comment(direction)
+  local change_detail = require("plz.review.collections.change_detail")
+  local win = vim.api.nvim_get_current_win()
+  local cur_buf = vim.api.nvim_win_get_buf(win)
+
+  local in_diff = cur_buf == state.diff_lhs_buf or cur_buf == state.diff_rhs_buf
+  local cursor_line = in_diff and vim.api.nvim_win_get_cursor(win)[1] or 0
+
+  -- Try to find next/prev comment in current file's diff
+  if in_diff and state.current_file_idx then
+    local commented_lines, side, buf = get_commented_lines_in_diff()
+    if #commented_lines > 0 then
+      local target
+      if direction > 0 then
+        for _, line in ipairs(commented_lines) do
+          if line > cursor_line then target = line; break end
+        end
+      else
+        for i = #commented_lines, 1, -1 do
+          if commented_lines[i] < cursor_line then target = commented_lines[i]; break end
+        end
+      end
+
+      if target then
+        -- Close current expanded comment
+        local current_key = side .. ":" .. buf .. ":" .. cursor_line
+        if state.expanded_comments[current_key] then
+          state.expanded_comments[current_key] = false
+        end
+        -- Open target
+        state.expanded_comments[side .. ":" .. buf .. ":" .. target] = true
+        M.show_comment_indicators()
+        local diff_win = buf == state.diff_rhs_buf and state.diff_rhs_win or state.diff_lhs_win
+        if diff_win and vim.api.nvim_win_is_valid(diff_win) then
+          pcall(vim.api.nvim_win_set_cursor, diff_win, { target, 0 })
+        end
+        M._resync_scroll()
+        return
+      end
+    end
+  end
+
+  -- No more comments in current file in this direction — cross to next/prev file
+  local start_idx = state.current_file_idx or 1
+  local total = #state.files
+  if total == 0 then
+    vim.notify("plz: no comments", vim.log.levels.INFO)
+    return
+  end
+
+  -- Search for next file with comments
+  local idx = start_idx
+  for _ = 1, total do
+    idx = idx + direction
+    if idx > total then idx = 1
+    elseif idx < 1 then idx = total end
+
+    if file_has_comments(idx) then
+      -- Close any expanded comment in current diff
+      state.expanded_comments = {}
+
+      -- Open the diff for this file (async — comment jump happens in callback)
+      state._jump_comment_direction = direction
+      change_detail.open_diff(idx)
+      return
+    end
+  end
+
+  vim.notify("plz: no comments", vim.log.levels.INFO)
+end
+
+--- Called after a diff loads to continue a cross-file comment jump.
+function M.continue_jump_after_load()
+  local direction = state._jump_comment_direction
+  state._jump_comment_direction = nil
+  if not direction then return end
+
+  local commented_lines, side, buf = get_commented_lines_in_diff()
   if #commented_lines == 0 then return end
 
-  -- Find next/prev
   local target
   if direction > 0 then
-    for _, line in ipairs(commented_lines) do
-      if line > cursor_line then target = line; break end
-    end
-    if not target then target = commented_lines[1] end -- wrap
+    target = commented_lines[1]
   else
-    for i = #commented_lines, 1, -1 do
-      if commented_lines[i] < cursor_line then target = commented_lines[i]; break end
-    end
-    if not target then target = commented_lines[#commented_lines] end -- wrap
+    target = commented_lines[#commented_lines]
   end
+  if not target then return end
 
-  -- Close the comment we're currently on (if expanded)
-  local current_key = side .. ":" .. buf .. ":" .. cursor_line
-  if state.expanded_comments[current_key] then
-    state.expanded_comments[current_key] = false
-  end
-
-  -- Open the target comment
-  local target_key = side .. ":" .. buf .. ":" .. target
-  state.expanded_comments[target_key] = true
-
-  -- Re-render and jump
+  state.expanded_comments[side .. ":" .. buf .. ":" .. target] = true
   M.show_comment_indicators()
-  pcall(vim.api.nvim_win_set_cursor, win, { target, 0 })
+  local diff_win = buf == state.diff_rhs_buf and state.diff_rhs_win or state.diff_lhs_win
+  if diff_win and vim.api.nvim_win_is_valid(diff_win) then
+    vim.api.nvim_set_current_win(diff_win)
+    pcall(vim.api.nvim_win_set_cursor, diff_win, { target, 0 })
+  end
+  M._resync_scroll()
 end
 
 return M
