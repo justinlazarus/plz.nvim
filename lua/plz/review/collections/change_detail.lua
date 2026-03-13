@@ -158,8 +158,17 @@ function M.populate_diff(data)
   -- Apply highlights
   render_mod.apply(lhs_buf, rhs_buf, data.result, data.padded_lhs, data.padded_rhs)
 
+  -- Collect comment lines so they are not folded away
+  local path = state.files[state.current_file_idx]
+  path = path and (path.filename or path.path) or ""
+  local rhs_comments = state.comments_by_file and state.comments_by_file[path] or {}
+  local lhs_comments = state.comments_by_file_left and state.comments_by_file_left[path] or {}
+  local comment_lines = { lhs = {}, rhs = {} }
+  for orig_line in pairs(rhs_comments) do comment_lines.rhs[orig_line] = true end
+  for orig_line in pairs(lhs_comments) do comment_lines.lhs[orig_line] = true end
+
   -- Native vim folds over unchanged regions
-  diff_mod._setup_folds(diff_state, data.padded_lhs, data.padded_rhs, data.result, 3)
+  diff_mod._setup_folds(diff_state, data.padded_lhs, data.padded_rhs, data.result, 3, comment_lines)
 
   -- Hunk navigation
   diff_mod._setup_hunk_navigation(diff_state, data.result, data.padded_lhs, data.padded_rhs)
@@ -167,15 +176,19 @@ function M.populate_diff(data)
   -- File navigation and q keymap on diff buffers
   M.setup_diff_keymaps(diff_state)
 
-  -- Show file position
+  -- Show file position (sets winbar) then resize top to fit content
   files.update_diff_status()
+  layout.resize_top_to_content()
 
   -- Show comment indicators
   state.expanded_comments = {}
   comments.show_comment_indicators()
 
-  -- Focus the RHS (new code) window
-  vim.api.nvim_set_current_win(state.diff_rhs_win)
+  -- Focus the RHS (new code) window, unless suppressed
+  if not state._suppress_diff_focus then
+    vim.api.nvim_set_current_win(state.diff_rhs_win)
+  end
+  state._suppress_diff_focus = nil
 end
 
 --- Clear the file list winbar.

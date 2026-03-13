@@ -98,9 +98,8 @@ function M.render_reviews(buf, win)
   -- Winbar header
   if win and vim.api.nvim_win_is_valid(win) then
     local count_str = #reviews .. " reviews"
-    local winbar = "%#PlzAccent#  " .. fit(count_str, 14):gsub("%%", "%%%%")
-      .. "%#PlzHeader#" .. fit(icons.person or "", author_w):gsub("%%", "%%%%")
-      .. fit("State", state_w):gsub("%%", "%%%%")
+    local winbar = "%#PlzAccent#  " .. fit(count_str, author_w):gsub("%%", "%%%%")
+      .. "%#PlzHeader#" .. fit("State", state_w):gsub("%%", "%%%%")
       .. fit(icons.updated or "", time_w):gsub("%%", "%%%%")
       .. "Comments"
     vim.wo[win].winbar = winbar

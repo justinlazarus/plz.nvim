@@ -104,26 +104,22 @@ function M.create_initial()
     [3] = { top_buf = c3_top, bottom_buf = nil, cursor = nil },
   }
 
-  -- Start with Collection 3 (file list) — matches current UX
-  state.active_collection = 3
-  vim.api.nvim_win_set_buf(state.top_win, c3_top)
-  set_win_opts(state.top_win, interactive)
+  -- Start with Collection 1 (PR summary / commits)
+  state.active_collection = 1
+  vim.api.nvim_win_set_buf(state.top_win, c1_top)
+  set_win_opts(state.top_win, no_interact)
 
-  -- Create bottom window (empty for C3 initially — diff fills it on demand)
+  -- Create bottom window for C1 (commits)
   vim.cmd("botright split")
   state.bottom_win = vim.api.nvim_get_current_win()
-  -- Create a scratch buffer to hold the bottom window open
-  local scratch = vim.api.nvim_create_buf(false, true)
-  vim.bo[scratch].buftype = "nofile"
-  vim.bo[scratch].bufhidden = "wipe"
-  vim.api.nvim_win_set_buf(state.bottom_win, scratch)
-  set_win_opts(state.bottom_win, no_interact)
+  vim.api.nvim_win_set_buf(state.bottom_win, c1_bot)
+  set_win_opts(state.bottom_win, interactive)
 
   -- Even split
   vim.cmd("wincmd =")
 
-  -- Focus top window (file list)
-  vim.api.nvim_set_current_win(state.top_win)
+  -- Focus bottom window (commits) for interactivity
+  vim.api.nvim_set_current_win(state.bottom_win)
 
   M.sync_aliases()
 
@@ -137,9 +133,32 @@ function M.create_initial()
   -- Render
   review._render()
   review._setup_keymaps()
+  M.resize_top_to_content()
+end
 
-  if #state.files > 0 then
-    pcall(vim.api.nvim_win_set_cursor, state.top_win, { 1, 0 })
+--- Resize the top window to fit its content, capped at 50% of total height.
+function M.resize_top_to_content()
+  if not state.top_win or not vim.api.nvim_win_is_valid(state.top_win) then return end
+  -- Find a bottom window to compute total available height
+  local bottom_win = state.bottom_win
+  if not bottom_win or not vim.api.nvim_win_is_valid(bottom_win) then
+    bottom_win = state.diff_lhs_win
+  end
+  if not bottom_win or not vim.api.nvim_win_is_valid(bottom_win) then return end
+
+  local top_h = vim.api.nvim_win_get_height(state.top_win)
+  local bot_h = vim.api.nvim_win_get_height(bottom_win)
+  local total = top_h + bot_h
+  local max_top = math.floor(total / 2)
+  local content_lines = vim.api.nvim_buf_line_count(
+    vim.api.nvim_win_get_buf(state.top_win))
+  -- Winbar occupies 1 row of window height, add it if present
+  local winbar = vim.wo[state.top_win].winbar
+  local needed = content_lines + ((winbar and winbar ~= "") and 1 or 0)
+  local target = math.min(max_top, needed)
+  if target < 1 then target = 1 end
+  if target ~= top_h then
+    vim.api.nvim_win_set_height(state.top_win, target)
   end
 end
 
@@ -277,6 +296,12 @@ function M.switch_to(id)
     -- File list is already the buf; just re-render
     local files = require("plz.review.files")
     files.render()
+    -- Auto-open first diff if none selected yet, keep focus on file list
+    if not state.current_file_idx and #state.files > 0 then
+      state._suppress_diff_focus = true
+      local change_detail = require("plz.review.collections.change_detail")
+      change_detail.open_diff(1)
+    end
   elseif id == 2 then
     local review_detail = require("plz.review.collections.review_detail")
     review_detail.render_reviews(c.top_buf, state.top_win)
@@ -290,6 +315,8 @@ function M.switch_to(id)
       vim.api.nvim_set_current_win(state.top_win)
     end
   end
+
+  M.resize_top_to_content()
 
   restore_cursor(id)
 

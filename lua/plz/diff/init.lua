@@ -88,7 +88,8 @@ end
 --- @param padded_rhs table[] Full aligned RHS
 --- @param diff_result table Normalized difftastic output
 --- @param context number Lines of context around changes
-function M._setup_folds(diff_state, padded_lhs, padded_rhs, diff_result, context)
+--- @param comment_lines table|nil {lhs={orig_line=true}, rhs={orig_line=true}}
+function M._setup_folds(diff_state, padded_lhs, padded_rhs, diff_result, context, comment_lines)
   context = context or 3
   local n = #padded_lhs
   if n == 0 then return end
@@ -113,6 +114,16 @@ function M._setup_folds(diff_state, padded_lhs, padded_rhs, diff_result, context
       if entry.rhs_line and rhs_map[entry.rhs_line] then
         changed[rhs_map[entry.rhs_line]] = true
       end
+    end
+  end
+
+  -- Mark rows with comments
+  if comment_lines then
+    for orig_line in pairs(comment_lines.lhs or {}) do
+      if lhs_map[orig_line] then changed[lhs_map[orig_line]] = true end
+    end
+    for orig_line in pairs(comment_lines.rhs or {}) do
+      if rhs_map[orig_line] then changed[rhs_map[orig_line]] = true end
     end
   end
 
