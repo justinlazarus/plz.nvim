@@ -63,7 +63,7 @@ function M._write_header()
     and vim.api.nvim_win_get_width(state.list_win) or 90
   local border = string.rep("─", win_w)
 
-  local tab_text, tab_regions = render.tab_line(fetch.sections, state.tab_idx)
+  local tab_text, tab_regions = render.tab_line(fetch.get_sections(), state.tab_idx)
   lines[1] = tab_text
   all_regions[1] = tab_regions
 
@@ -140,9 +140,10 @@ function M._fetch_ado_batch()
       ado.fetch_work_item(ab_id, function(item, _err)
         if item then
           state.ado_cache[ab_id] = item
-          -- Re-render rows to show fetched ADO data
-          M._render_rows()
+        else
+          state.ado_cache[ab_id] = { not_found = true }
         end
+        M._render_rows()
       end)
     end
   end
@@ -198,18 +199,18 @@ function M._setup_keymaps()
   local buf = state.list_buf
   local opts = { buffer = buf, nowait = true }
 
-  for i = 1, #fetch.sections do
+  for i = 1, #fetch.get_sections() do
     vim.keymap.set("n", tostring(i), function()
       M._fetch_tab(i)
-    end, vim.tbl_extend("force", opts, { desc = fetch.sections[i].name }))
+    end, vim.tbl_extend("force", opts, { desc = fetch.get_sections()[i].name }))
   end
 
   vim.keymap.set("n", "<Tab>", function()
-    M._fetch_tab((state.tab_idx % #fetch.sections) + 1)
+    M._fetch_tab((state.tab_idx % #fetch.get_sections()) + 1)
   end, vim.tbl_extend("force", opts, { desc = "Next tab" }))
 
   vim.keymap.set("n", "<S-Tab>", function()
-    M._fetch_tab(((state.tab_idx - 2) % #fetch.sections) + 1)
+    M._fetch_tab(((state.tab_idx - 2) % #fetch.get_sections()) + 1)
   end, vim.tbl_extend("force", opts, { desc = "Previous tab" }))
 
   vim.keymap.set("n", "o", function()
@@ -255,7 +256,7 @@ function M._setup_keymaps()
     "r         refresh",
     "L         load more",
     "/         edit filter",
-    "1-" .. #fetch.sections .. "       switch tab",
+    "1-" .. #fetch.get_sections() .. "       switch tab",
     "<Tab>     next tab",
     "<S-Tab>   previous tab",
     "q         close",
@@ -268,7 +269,7 @@ end
 
 --- Get the active filter string for the current tab.
 function M._get_filter()
-  return state.filter_overrides[state.tab_idx] or fetch.sections[state.tab_idx].filter
+  return state.filter_overrides[state.tab_idx] or fetch.get_sections()[state.tab_idx].filter
 end
 
 --- Enter filter editing mode.

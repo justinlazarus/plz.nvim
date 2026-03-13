@@ -9,6 +9,13 @@ M.config = {
     auto_create = true,
     auto_cleanup = true,
   },
+  dashboard = {
+    sections = {
+      { name = "Review Requested", filter = "is:pr is:open review-requested:@me" },
+      { name = "My PRs", filter = "is:pr is:open author:@me" },
+      { name = "All Open", filter = "is:pr is:open" },
+    },
+  },
 }
 
 function M.setup(opts)
@@ -26,7 +33,7 @@ function M.setup(opts)
   -- Dashboard highlights — matching gh-dash color scheme
   vim.api.nvim_set_hl(0, "PlzOpen", { fg = "#42A0FA", default = true })
   vim.api.nvim_set_hl(0, "PlzDraft", { fg = "#656C76", default = true })
-  vim.api.nvim_set_hl(0, "PlzClosed", { fg = "#656C76", default = true })
+  vim.api.nvim_set_hl(0, "PlzClosed", { fg = "#E06C75", default = true })
   vim.api.nvim_set_hl(0, "PlzMerged", { fg = "#A371F7", default = true })
   vim.api.nvim_set_hl(0, "PlzSuccess", { fg = "#3DF294", default = true })
   vim.api.nvim_set_hl(0, "PlzWarning", { fg = "#E5C07B", default = true })

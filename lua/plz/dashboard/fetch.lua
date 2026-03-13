@@ -12,24 +12,12 @@ local PR_FIELDS = table.concat({
   "headRefOid", "baseRefOid", "reviewRequests",
 }, ",")
 
---- Section definitions — each tab in the dashboard.
-M.sections = {
-  {
-    name = "Review Requested",
-    filter = "is:pr is:open review-requested:@me",
-    args = { "pr", "list", "--state", "open", "--search", "review-requested:@me", "--json", PR_FIELDS, "--limit", tostring(M.PAGE_SIZE) },
-  },
-  {
-    name = "My PRs",
-    filter = "is:pr is:open author:@me",
-    args = { "pr", "list", "--state", "open", "--author", "@me", "--json", PR_FIELDS, "--limit", tostring(M.PAGE_SIZE) },
-  },
-  {
-    name = "All Open",
-    filter = "is:pr is:open",
-    args = { "pr", "list", "--state", "open", "--json", PR_FIELDS, "--limit", tostring(M.PAGE_SIZE) },
-  },
-}
+--- Get section definitions from config.
+--- @return table[]
+function M.get_sections()
+  return require("plz").config.dashboard.sections
+end
+
 
 --- Build gh args from a filter string.
 --- @param filter string
@@ -70,12 +58,14 @@ end
 --- @param section_idx number 1-indexed section
 --- @param callback fun(prs: table[]|nil, err?: string)
 function M.fetch_section(section_idx, callback)
-  local section = M.sections[section_idx]
+  local sections = M.get_sections()
+  local section = sections[section_idx]
   if not section then
     callback(nil, "invalid section index: " .. tostring(section_idx))
     return
   end
-  gh.run(section.args, callback)
+  local args = M.args_from_filter(section.filter)
+  gh.run(args, callback)
 end
 
 return M

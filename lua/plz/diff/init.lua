@@ -133,7 +133,10 @@ function M._setup_folds(diff_state, padded_lhs, padded_rhs, diff_result, context
       while i <= n and not visible[i] do
         i = i + 1
       end
-      table.insert(folds, { start, i - 1 })
+      -- Only fold if the hunk is at least 5 lines
+      if i - 1 - start + 1 >= 5 then
+        table.insert(folds, { start, i - 1 })
+      end
     else
       i = i + 1
     end

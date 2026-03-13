@@ -19,7 +19,7 @@ M.icons = {
   open     = u(0xf407),  -- OpenIcon
   draft    = u(0xebdb),  -- DraftIcon
   closed   = u(0xf4dc),  -- ClosedIcon
-  merged   = u(0xf4c9),  -- MergedIcon
+  merged   = u(0xf419),  -- MergedIcon
   -- CI status (from gh-dash prrow.go)
   ci_pass  = u(0xf058),  -- SuccessIcon
   ci_fail  = u(0xf0159), -- FailureIcon
@@ -40,6 +40,7 @@ M.icons = {
   -- ADO (plz-specific)
   ado_bug   = u(0xeaaf),
   ado_story = u(0xf1a9e),
+  ado_task  = u(0xf4a0),
   ado_none  = u(0xf073a),
   ado_h     = u(0xf0ae),
   release   = u(0xf427),
@@ -189,30 +190,39 @@ function M.format_row(pr, cols, ado_item)
   local author = M._truncate(raw_name:gsub("%s*%[.-%]%s*$", ""), cols.author - 2)
 
   -- ADO column (icon only)
-  local ado_str = M.icons.ado_none
-  local ado_hl = "PlzError"
+  local ado_str = ""
+  local ado_hl = nil
   local ab_id = ((pr.title or ""):match("AB#(%d+)") or (pr.body or ""):match("AB#(%d+)"))
-  if ab_id then
-    if ado_item then
-      local is_bug = ado_item.type == "Bug"
-      ado_str = is_bug and M.icons.ado_bug or M.icons.ado_story
-      local item_state = (ado_item.state or ""):lower()
-      if item_state == "new" or item_state == "active" then
-        ado_hl = is_bug and "PlzError" or "PlzSuccess"
-      else
-        ado_hl = "PlzFaint"
-      end
+  if ab_id and ado_item and not ado_item.not_found then
+    local ado_type = ado_item.type or ""
+    ado_str = ado_type == "Bug" and M.icons.ado_bug
+      or ado_type == "Task" and M.icons.ado_task
+      or M.icons.ado_story
+    local item_state = (ado_item.state or ""):lower()
+    if item_state == "new" then
+      ado_hl = "PlzDraft"        -- gray
+    elseif item_state == "active" then
+      ado_hl = "PlzOpen"         -- blue
+    elseif item_state == "resolved" or item_state == "closed" then
+      ado_hl = "PlzMerged"       -- purple
     else
-      ado_str = M.icons.dot
       ado_hl = "PlzFaint"
     end
+  elseif ab_id and ado_item and ado_item.not_found then
+    -- AB# reference but work item doesn't exist
+    ado_str = M.icons.ado_none
+    ado_hl = "PlzError"
+  elseif ab_id then
+    ado_str = M.icons.dot
+    ado_hl = "PlzFaint"         -- loading placeholder
   end
 
-  -- Release version (from ADO story tags)
+  -- Release version (from ADO work item tags)
   local release_str = ""
-  if ado_item and ado_item.type ~= "Bug" and ado_item.tags and ado_item.tags ~= "" then
+  if ado_item and not ado_item.not_found and ado_item.tags and ado_item.tags ~= "" then
     for tag in ado_item.tags:gmatch("[^;]+") do
-      local ver = vim.trim(tag):match("^[Rr]elease%s*(.+)")
+      local t = vim.trim(tag)
+      local ver = t:match("^[Rr]elease%s*(.+)") or t:match("^(%d+%.%d+[%d%.]*)")
       if ver then
         release_str = vim.trim(ver)
         break

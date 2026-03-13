@@ -1442,24 +1442,28 @@ end
 function M._build_ado_line(pr)
   local ab_id = ((pr.title or ""):match("AB#(%d+)") or (pr.body or ""):match("AB#(%d+)"))
   if not ab_id then
-    local line = "  " .. icons.ado_none .. " No linked work item"
-    return line, { { 2, #line, "PlzFaint" } }
+    return "", {}
   end
 
   -- Check if we already have cached ADO data
   if state.ado_item then
+    if state.ado_item.not_found then
+      return "", {}
+    end
     return M._format_ado_line(state.ado_item)
   end
 
   -- Kick off async fetch, show placeholder for now
-  local line = "  " .. icons.ado_none .. " AB#" .. ab_id .. " loading…"
+  local line = "  AB#" .. ab_id .. " loading…"
   ado.fetch_work_item(ab_id, function(item, err)
     if item then
       state.ado_item = item
-      -- Re-render summary with ADO data
-      if state.summary_buf and vim.api.nvim_buf_is_valid(state.summary_buf) then
-        M._render_summary()
-      end
+    else
+      state.ado_item = { not_found = true }
+    end
+    -- Re-render summary
+    if state.summary_buf and vim.api.nvim_buf_is_valid(state.summary_buf) then
+      M._render_summary()
     end
   end)
   return line, { { 2, #line, "PlzFaint" } }
@@ -1470,9 +1474,15 @@ end
 --- @return string line
 --- @return table[] hl_regions
 function M._format_ado_line(item)
-  local is_bug = item.type == "Bug"
-  local icon = is_bug and icons.ado_bug or icons.ado_story
-  local icon_hl = is_bug and "PlzError" or "PlzSuccess"
+  local ado_type = item.type or ""
+  local icon = ado_type == "Bug" and icons.ado_bug
+    or ado_type == "Task" and icons.ado_task
+    or icons.ado_story
+  local item_state = (item.state or ""):lower()
+  local icon_hl = item_state == "new" and "PlzDraft"
+    or item_state == "active" and "PlzOpen"
+    or (item_state == "resolved" or item_state == "closed") and "PlzMerged"
+    or "PlzFaint"
 
   local prefix = icon .. " AB#" .. item.id
   local parts = { prefix, item.state, item.assigned_to }
