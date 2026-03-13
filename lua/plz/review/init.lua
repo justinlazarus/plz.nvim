@@ -413,10 +413,10 @@ function M._setup_keymaps()
   -- C3 file list keymaps (delegated to change_detail)
   change_detail.setup_file_keymaps(M)
 
-  -- C1 bottom (commits) buffer keymaps
+  -- C1 top (commits) buffer keymaps
   local c1 = state.collections and state.collections[1]
-  if c1 and c1.bottom_buf then
-    local s_opts = { buffer = c1.bottom_buf, nowait = true }
+  if c1 and c1.top_buf then
+    local s_opts = { buffer = c1.top_buf, nowait = true }
     vim.keymap.set("n", "q", function()
       if state.commit_mode then
         M._exit_commit_mode()
@@ -433,7 +433,7 @@ function M._setup_keymaps()
 
     vim.keymap.set("n", "<CR>", function()
       if state.active_collection == 1 and state.commits then
-        local win = state.bottom_win
+        local win = state.top_win
         if win and vim.api.nvim_win_is_valid(win) then
           local row = vim.api.nvim_win_get_cursor(win)[1]
           if row >= 1 and row <= #state.commits then
@@ -444,9 +444,9 @@ function M._setup_keymaps()
     end, vim.tbl_extend("force", s_opts, { desc = "View commit files" }))
   end
 
-  -- C1 top (info+description) buffer keymaps
-  if c1 and c1.top_buf then
-    local i_opts = { buffer = c1.top_buf, nowait = true }
+  -- C1 bottom (info+description) buffer keymaps
+  if c1 and c1.bottom_buf then
+    local i_opts = { buffer = c1.bottom_buf, nowait = true }
     vim.keymap.set("n", "q", function()
       M.close()
     end, vim.tbl_extend("force", i_opts, { desc = "Close review" }))

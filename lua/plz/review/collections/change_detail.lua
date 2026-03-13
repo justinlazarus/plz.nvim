@@ -70,6 +70,9 @@ function M.create_diff_split()
 
   -- Even split between top and diff area
   vim.cmd("wincmd =")
+
+  -- Keep focus on file list
+  vim.api.nvim_set_current_win(state.top_win or state.win)
 end
 
 --- Clean up old diff buffers after new ones are already displayed.
@@ -187,10 +190,6 @@ function M.populate_diff(data)
   state.expanded_comments = {}
   comments.show_comment_indicators()
 
-  -- Focus the RHS (new code) window, unless suppressed
-  if not state._suppress_diff_focus then
-    vim.api.nvim_set_current_win(state.diff_rhs_win)
-  end
   state._suppress_diff_focus = nil
 end
 

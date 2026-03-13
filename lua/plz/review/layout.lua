@@ -16,9 +16,37 @@ function _G.PlzReviewStatusLine()
     local owner, name = state.pr.url:match("github%.com/([^/]+)/([^/]+)")
     if owner and name then repo = owner .. "/" .. name end
   end
-  local left = "%#PlzStatusLine# \xef\x93\x89"
+  local left = "%#PlzStatusPillIcon# \xef\x93\x89 %#PlzStatusPill# plz %#PlzStatusLine#"
   if repo ~= "" then
-    left = left .. " %#PlzStatusFaint#\xef\x90\x81 " .. repo:gsub("%%", "%%%%")
+    left = left .. "%#PlzStatusRepo# \xef\x90\x81 " .. repo:gsub("%%", "%%%%") .. " %#PlzStatusLine#"
+  end
+  if state then
+    local ac = state.active_collection or 0
+    if ac == 1 and state.commits and #state.commits > 0 then
+      local idx = 1
+      if state.top_win and vim.api.nvim_win_is_valid(state.top_win) then
+        local row = vim.api.nvim_win_get_cursor(state.top_win)[1]
+        if row >= 1 and row <= #state.commits then idx = row end
+      end
+      local prnum = state.pr and state.pr.number or ""
+      left = left .. "%#PlzStatusPill# \xef\x90\x87 " .. prnum .. " %#PlzStatusRepo# commit " .. idx .. " of " .. #state.commits .. " %#PlzStatusLine#"
+    elseif ac == 2 and state.reviews and #state.reviews > 0 then
+      local idx = 1
+      if state.top_win and vim.api.nvim_win_is_valid(state.top_win) then
+        local row = vim.api.nvim_win_get_cursor(state.top_win)[1]
+        if row >= 1 and row <= #state.reviews then idx = row end
+      end
+      local prnum = state.pr and state.pr.number or ""
+      left = left .. "%#PlzStatusPill# \xef\x90\x87 " .. prnum .. " %#PlzStatusRepo# review " .. idx .. " of " .. #state.reviews .. " %#PlzStatusLine#"
+    elseif ac == 3 and state.files and #state.files > 0 then
+      local idx = state.current_file_idx or 1
+      if state.top_win and vim.api.nvim_win_is_valid(state.top_win) then
+        local row = vim.api.nvim_win_get_cursor(state.top_win)[1]
+        if row >= 1 and row <= #state.files then idx = row end
+      end
+      local prnum = state.pr and state.pr.number or ""
+      left = left .. "%#PlzStatusPill# \xef\x90\x87 " .. prnum .. " %#PlzStatusRepo# file " .. idx .. " of " .. #state.files .. " %#PlzStatusLine#"
+    end
   end
   local right = ""
   if state and state.last_fetched then
@@ -29,7 +57,7 @@ function _G.PlzReviewStatusLine()
     elseif diff < 86400 then ago = "~" .. math.floor(diff / 3600) .. "h ago"
     else ago = "~" .. math.floor(diff / 86400) .. "d ago"
     end
-    right = "%#PlzStatusFaint#Updated " .. ago .. " "
+    right = "%#PlzStatusRepo# Updated " .. ago .. " "
   end
   return left .. "%=" .. right
 end
@@ -106,13 +134,13 @@ function M.create_initial()
   state.top_win = vim.api.nvim_get_current_win()
 
   -- Create all persistent buffers
-  -- C1 top: info
+  -- C1 top: commits
   local c1_top = vim.api.nvim_create_buf(false, true)
   vim.bo[c1_top].buftype = "nofile"
   vim.bo[c1_top].bufhidden = "hide"
   vim.bo[c1_top].filetype = "plz-review"
 
-  -- C1 bottom: commits
+  -- C1 bottom: PR detail/info
   local c1_bot = vim.api.nvim_create_buf(false, true)
   vim.bo[c1_bot].buftype = "nofile"
   vim.bo[c1_bot].bufhidden = "hide"
@@ -153,8 +181,8 @@ function M.create_initial()
   -- Even split
   vim.cmd("wincmd =")
 
-  -- Focus bottom window (commits) for interactivity
-  vim.api.nvim_set_current_win(state.bottom_win)
+  -- Focus top window (PR detail) on initial load
+  vim.api.nvim_set_current_win(state.top_win)
 
   M.sync_aliases()
 
@@ -251,11 +279,11 @@ local function create_bottom_for(id)
     vim.api.nvim_win_set_buf(state.bottom_win, scratch)
     set_win_opts(state.bottom_win, no_interact)
   elseif id == 1 then
-    -- C1: bottom shows commits
+    -- C1: bottom shows PR detail
     vim.cmd("botright split")
     state.bottom_win = vim.api.nvim_get_current_win()
     vim.api.nvim_win_set_buf(state.bottom_win, c.bottom_buf)
-    set_win_opts(state.bottom_win, interactive)
+    set_win_opts(state.bottom_win, no_interact)
   elseif id == 2 then
     -- C2: bottom shows review threads
     vim.cmd("botright split")
@@ -307,11 +335,7 @@ function M.switch_to(id)
   -- Swap top buffer
   if state.top_win and vim.api.nvim_win_is_valid(state.top_win) then
     vim.api.nvim_win_set_buf(state.top_win, c.top_buf)
-    if id == 3 or id == 2 then
-      set_win_opts(state.top_win, interactive)
-    else
-      set_win_opts(state.top_win, no_interact)
-    end
+    set_win_opts(state.top_win, interactive)
   end
 
   -- Recreate bottom
@@ -321,12 +345,8 @@ function M.switch_to(id)
 
   -- Render appropriate content
   if id == 1 then
-    summary.render_detail_to(c.top_buf, state.top_win)
-    summary.render_commits_to(c.bottom_buf, state.bottom_win)
-    -- Focus bottom (commits) for interactivity
-    if state.bottom_win and vim.api.nvim_win_is_valid(state.bottom_win) then
-      vim.api.nvim_set_current_win(state.bottom_win)
-    end
+    summary.render_commits_to(c.top_buf, state.top_win)
+    summary.render_detail_to(c.bottom_buf, state.bottom_win)
   elseif id == 3 then
     -- File list is already the buf; just re-render
     local files = require("plz.review.files")
@@ -355,8 +375,8 @@ function M.switch_to(id)
 
   restore_cursor(id)
 
-  -- Focus top window for C3
-  if id == 3 and state.top_win and vim.api.nvim_win_is_valid(state.top_win) then
+  -- Always focus top window
+  if state.top_win and vim.api.nvim_win_is_valid(state.top_win) then
     vim.api.nvim_set_current_win(state.top_win)
   end
 end

@@ -117,13 +117,22 @@ end
 --- Statusline expression evaluated on every redraw (keeps "Updated" time fresh).
 function _G.PlzDashboardStatusLine()
   local repo = state.repo_name or ""
-  local left = "%#PlzStatusLine# \xef\x93\x89"
+  local left = "%#PlzStatusPillIcon# \xef\x93\x89 %#PlzStatusPill# plz %#PlzStatusLine#"
   if repo ~= "" then
-    left = left .. " %#PlzStatusFaint#\xef\x90\x81 " .. repo:gsub("%%", "%%%%")
+    left = left .. "%#PlzStatusRepo# \xef\x90\x81 " .. repo:gsub("%%", "%%%%") .. " %#PlzStatusLine#"
+  end
+  if #state.prs > 0 and state.list_win and vim.api.nvim_win_is_valid(state.list_win) then
+    local row = vim.api.nvim_win_get_cursor(state.list_win)[1]
+    local idx = row - HEADER_LINES
+    if idx >= 1 and idx <= #state.prs then
+      local pr = state.prs[idx]
+      local num = pr and pr.number or ""
+      left = left .. "%#PlzStatusPill# \xef\x90\x87 " .. num .. " %#PlzStatusRepo# " .. idx .. " of " .. #state.prs .. " %#PlzStatusLine#"
+    end
   end
   local right = relative_ago(state.last_fetched)
   if right ~= "" then
-    right = "%#PlzStatusFaint#" .. right .. " "
+    right = "%#PlzStatusRepo# " .. right .. " "
   end
   return left .. "%=" .. right
 end

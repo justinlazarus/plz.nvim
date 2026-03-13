@@ -55,6 +55,10 @@ function M.setup(opts)
   vim.api.nvim_set_hl(0, "PlzItalic", { italic = true, default = true })
   local normal_bg = vim.api.nvim_get_hl(0, { name = "Normal" }).bg
   vim.api.nvim_set_hl(0, "PlzStatusLine", { fg = "#42A0FA", bg = normal_bg, default = true })
+  vim.api.nvim_set_hl(0, "PlzStatusPill", { fg = "#ABB2BF", bg = "#3E4452", bold = true, default = true })
+  vim.api.nvim_set_hl(0, "PlzStatusPillIcon", { fg = "#3DF294", bg = "#3E4452", default = true })
+
+  vim.api.nvim_set_hl(0, "PlzStatusRepo", { fg = "#C0C8D4", bg = "#4E5565", default = true })
   vim.api.nvim_set_hl(0, "PlzStatusFaint", { fg = "#656C76", bg = normal_bg, default = true })
 
   -- Non-diff highlights — link to existing groups
@@ -77,7 +81,7 @@ function M.setup(opts)
   -- Plz statusline: disable statusline plugins while in plz buffers.
   -- Works universally by temporarily hiding lualine/etc. via their
   -- hide() API, falling back to a timer-based override.
-  local plz_stl = "%#PlzStatusLine# \xef\x93\x89%="
+  local plz_stl = "%#PlzStatusPillIcon# \xef\x93\x89 %#PlzStatusPill# plz %#PlzStatusLine#%="
   local stl_hidden = false
 
   local saved_laststatus
@@ -111,13 +115,28 @@ function M.setup(opts)
       local ft = vim.bo.filetype or ""
       if ft:match("^plz") then
         show_plz_stl()
-        -- Re-apply dashboard statusline with repo name
+        -- Re-apply detailed statusline with repo name / position
         if ft == "plz-dashboard" then
           local ok, dash = pcall(require, "plz.dashboard")
           if ok and dash._update_statusline then dash._update_statusline() end
+        elseif ft == "plz-review" or ft == "plz-diff" then
+          local ok, layout = pcall(require, "plz.review.layout")
+          if ok and layout.plz_statusline then
+            vim.wo.statusline = layout.plz_statusline()
+          end
         end
       else
         restore_stl()
+      end
+    end,
+  })
+
+  -- Force statusline redraw on cursor movement so "x of y" stays current
+  vim.api.nvim_create_autocmd("CursorMoved", {
+    callback = function()
+      local ft = vim.bo.filetype or ""
+      if ft:match("^plz") then
+        vim.cmd("redrawstatus")
       end
     end,
   })

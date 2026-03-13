@@ -25,8 +25,8 @@ function M.render()
   if ac == 1 then
     local c = state.collections and state.collections[1]
     if c then
-      M.render_detail_to(c.top_buf, state.top_win)
-      M.render_commits_to(c.bottom_buf, state.bottom_win)
+      M.render_commits_to(c.top_buf, state.top_win)
+      M.render_detail_to(c.bottom_buf, state.bottom_win)
     end
   end
 end
