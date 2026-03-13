@@ -230,6 +230,8 @@ function M.switch_to(id)
 
   -- Clean up diff buffers if leaving C3
   if state.active_collection == 3 then
+    -- Bump generation to invalidate any in-flight diff callbacks
+    state.diff_gen = (state.diff_gen or 0) + 1
     review._cleanup_old_bufs(state.diff_lhs_buf, state.diff_rhs_buf)
     state.diff_lhs_buf = nil
     state.diff_rhs_buf = nil

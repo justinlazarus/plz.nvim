@@ -40,6 +40,7 @@ local state = {
   diff_status_win = nil,
   diff_status_buf = nil,
   current_file_idx = nil,
+  diff_gen = 0,            -- generation counter for stale diff callbacks
   ado_item = nil,
   viewed = {},  -- path -> bool, synced with GitHub viewed state
   -- Review comments
@@ -311,6 +312,8 @@ function M._enter_commit_mode(commit)
       vim.notify("plz: " .. err, vim.log.levels.ERROR)
       return
     end
+    -- Guard: review may have been closed while fetching
+    if not state.commit_mode or not state.collections then return end
 
     local parents = data.parents or {}
     state.commit_parent_sha = parents[1] and parents[1].sha or nil
@@ -574,6 +577,7 @@ function M.close()
   state.expanded_comments = {}
   state.pr = nil
   state.current_file_idx = nil
+  state.diff_gen = 0
   state.ado_item = nil
   state.commits = nil
   state.commit_mode = false

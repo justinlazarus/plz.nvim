@@ -293,6 +293,10 @@ function M.open_diff(file_idx)
   local prev_path = file.previous_filename or path
   state.current_file_idx = file_idx
 
+  -- Generation counter: ignore stale callbacks from prior open_diff calls
+  state.diff_gen = (state.diff_gen or 0) + 1
+  local gen = state.diff_gen
+
   -- Update active file indicator
   files.highlight_active()
 
@@ -324,7 +328,13 @@ function M.open_diff(file_idx)
   local base_content = ""
   local head_content = ""
 
+  --- Guard: abort if generation changed or no longer in C3.
+  local function is_stale()
+    return state.diff_gen ~= gen or state.active_collection ~= 3
+  end
+
   local function show_diff(data)
+    if is_stale() then return end
     if not state.diff_lhs_win or not vim.api.nvim_win_is_valid(state.diff_lhs_win) then
       M.create_diff_split()
     end
@@ -334,6 +344,7 @@ function M.open_diff(file_idx)
   local function on_ready()
     pending = pending - 1
     if pending > 0 then return end
+    if is_stale() then return end
 
     local file_status = file.status or "modified"
 
@@ -367,6 +378,7 @@ function M.open_diff(file_idx)
 
     -- Compute diff (async — difftastic runs in background)
     diff.compute(base_path, head_path, function(data, err, unchanged)
+      if is_stale() then return end
       if unchanged then
         vim.notify("plz: " .. vim.fn.fnamemodify(path, ":t") .. " — files are identical", vim.log.levels.INFO)
         return
@@ -383,6 +395,7 @@ function M.open_diff(file_idx)
   -- Fetch base version
   if state.base_sha then
     M.git_show(state.base_sha, prev_path, function(content)
+      if is_stale() then return end
       base_content = content
       on_ready()
     end)
@@ -393,6 +406,7 @@ function M.open_diff(file_idx)
 
   -- Fetch head version
   M.git_show(state.head_sha, path, function(content)
+    if is_stale() then return end
     head_content = content
     on_ready()
   end)
