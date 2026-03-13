@@ -85,20 +85,22 @@ function M.create_initial()
   vim.bo[c1_bot].buftype = "nofile"
   vim.bo[c1_bot].bufhidden = "hide"
 
-  -- C2 top: placeholder
+  -- C2 top: review list
   local c2_top = vim.api.nvim_create_buf(false, true)
   vim.bo[c2_top].buftype = "nofile"
   vim.bo[c2_top].bufhidden = "hide"
-  vim.bo[c2_top].modifiable = true
-  vim.api.nvim_buf_set_lines(c2_top, 0, -1, false, { "  Collection 2 — coming soon" })
-  vim.bo[c2_top].modifiable = false
+
+  -- C2 bottom: review threads
+  local c2_bot = vim.api.nvim_create_buf(false, true)
+  vim.bo[c2_bot].buftype = "nofile"
+  vim.bo[c2_bot].bufhidden = "hide"
 
   -- C3 top: file list
   local c3_top = files.create_buf()
 
   state.collections = {
     [1] = { top_buf = c1_top, bottom_buf = c1_bot, cursor = nil },
-    [2] = { top_buf = c2_top, bottom_buf = nil, cursor = nil },
+    [2] = { top_buf = c2_top, bottom_buf = c2_bot, cursor = nil },
     [3] = { top_buf = c3_top, bottom_buf = nil, cursor = nil },
   }
 
@@ -129,6 +131,7 @@ function M.create_initial()
   M.set_collection_keymaps(c1_top)
   M.set_collection_keymaps(c1_bot)
   M.set_collection_keymaps(c2_top)
+  M.set_collection_keymaps(c2_bot)
   M.set_collection_keymaps(c3_top)
 
   -- Render
@@ -199,14 +202,11 @@ local function create_bottom_for(id)
     state.bottom_win = vim.api.nvim_get_current_win()
     vim.api.nvim_win_set_buf(state.bottom_win, c.bottom_buf)
     set_win_opts(state.bottom_win, interactive)
-  else
-    -- C2: single pane, no bottom needed — but create one for consistency
+  elseif id == 2 then
+    -- C2: bottom shows review threads
     vim.cmd("botright split")
     state.bottom_win = vim.api.nvim_get_current_win()
-    local scratch = vim.api.nvim_create_buf(false, true)
-    vim.bo[scratch].buftype = "nofile"
-    vim.bo[scratch].bufhidden = "wipe"
-    vim.api.nvim_win_set_buf(state.bottom_win, scratch)
+    vim.api.nvim_win_set_buf(state.bottom_win, c.bottom_buf)
     set_win_opts(state.bottom_win, no_interact)
   end
 
@@ -251,7 +251,7 @@ function M.switch_to(id)
   -- Swap top buffer
   if state.top_win and vim.api.nvim_win_is_valid(state.top_win) then
     vim.api.nvim_win_set_buf(state.top_win, c.top_buf)
-    if id == 3 then
+    if id == 3 or id == 2 then
       set_win_opts(state.top_win, interactive)
     else
       set_win_opts(state.top_win, no_interact)
@@ -275,8 +275,19 @@ function M.switch_to(id)
     -- File list is already the buf; just re-render
     local files = require("plz.review.files")
     files.render()
+  elseif id == 2 then
+    local review_detail = require("plz.review.collections.review_detail")
+    review_detail.render_reviews(c.top_buf, state.top_win)
+    -- Show first review's threads if available
+    if state.reviews and #state.reviews > 0 then
+      state.selected_review_idx = state.selected_review_idx or 1
+      review_detail.render_threads(c.bottom_buf, state.bottom_win, state.selected_review_idx)
+    end
+    -- Focus top (review list) for interactivity
+    if state.top_win and vim.api.nvim_win_is_valid(state.top_win) then
+      vim.api.nvim_set_current_win(state.top_win)
+    end
   end
-  -- C2: placeholder already set
 
   restore_cursor(id)
 

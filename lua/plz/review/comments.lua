@@ -34,6 +34,9 @@ function M.fetch_review_comments(owner, repo, pr_number)
     end
     state.review_comments = comments or {}
     M.index_comments()
+    -- Re-index comments by review (for C2 review detail)
+    local ok, rd = pcall(require, "plz.review.collections.review_detail")
+    if ok then rd.index_comments_by_review() end
     -- Re-render file list to show comment counts
     if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
       local review_files = require("plz.review.files")

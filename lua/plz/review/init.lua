@@ -5,6 +5,7 @@ local comments = require("plz.review.comments")
 local files = require("plz.review.files")
 local summary = require("plz.review.summary")
 local layout = require("plz.review.layout")
+local review_detail = require("plz.review.collections.review_detail")
 
 local M = {}
 
@@ -16,7 +17,7 @@ local state = {
   files = {},
   base_sha = nil,
   head_sha = nil,
-  -- Active collection (1=info+commits, 2=placeholder, 3=files+diff)
+  -- Active collection (1=info+commits, 2=reviews, 3=files+diff)
   active_collection = 3,
   collections = nil,      -- populated by layout.create_initial()
   top_win = nil,           -- shared top window
@@ -47,12 +48,17 @@ local state = {
   comments_by_file = {}, -- path -> { line -> { comments } } (RIGHT side)
   comments_by_file_left = {}, -- path -> { line -> { comments } } (LEFT side)
   expanded_comments = {}, -- "side:buf:line" -> bool, tracks which comment indicators are expanded
+  -- Reviews (C2)
+  reviews = nil,             -- fetched review submissions (nil = not loaded)
+  comments_by_review = {},   -- review_id -> [comments]
+  selected_review_idx = nil, -- currently selected review in C2
 }
 
 comments.setup(state)
 files.setup(state)
 summary.setup(state)
 layout.setup(state)
+review_detail.setup(state)
 
 --- Open review for a PR from the dashboard.
 function M.open(pr)
@@ -107,6 +113,9 @@ function M.open(pr)
 
   -- Fetch review comments in background
   comments.fetch_review_comments(owner, repo, pr.number)
+
+  -- Fetch review submissions in background
+  review_detail.fetch_reviews(owner, repo, pr.number)
 end
 
 --- Ensure the PR commits are available locally.
@@ -470,7 +479,7 @@ function M._setup_keymaps()
   local help_lines = {
     "plz review",
     "",
-    "<Tab>     next collection (Info+Commits → Placeholder → Files+Diff)",
+    "<Tab>     next collection (Info+Commits → Reviews → Files+Diff)",
     "<S-Tab>   previous collection",
     "1/2/3     jump to collection",
     "<CR>      open diff / select commit (in commits view)",
@@ -531,6 +540,52 @@ function M._setup_keymaps()
         vim.ui.open(state.pr.url)
       end
     end, vim.tbl_extend("force", i_opts, { desc = "Open PR in browser" }))
+  end
+
+  -- C2 top (review list) buffer keymaps
+  local c2 = state.collections and state.collections[2]
+  if c2 and c2.top_buf then
+    local r_opts = { buffer = c2.top_buf, nowait = true }
+
+    vim.keymap.set("n", "<CR>", function()
+      if state.active_collection ~= 2 then return end
+      local reviews = state.reviews or {}
+      if #reviews == 0 then return end
+      local win = state.top_win
+      if not win or not vim.api.nvim_win_is_valid(win) then return end
+      local row = vim.api.nvim_win_get_cursor(win)[1]
+      if row >= 1 and row <= #reviews then
+        state.selected_review_idx = row
+        review_detail.render_threads(c2.bottom_buf, state.bottom_win, row)
+      end
+    end, vim.tbl_extend("force", r_opts, { desc = "Select review" }))
+
+    vim.keymap.set("n", "o", function()
+      if state.active_collection ~= 2 then return end
+      local reviews = state.reviews or {}
+      if #reviews == 0 then return end
+      local win = state.top_win
+      if not win or not vim.api.nvim_win_is_valid(win) then return end
+      local row = vim.api.nvim_win_get_cursor(win)[1]
+      local review = reviews[row]
+      if review and review.html_url then
+        vim.ui.open(review.html_url)
+      elseif state.pr and state.pr.url then
+        vim.ui.open(state.pr.url)
+      end
+    end, vim.tbl_extend("force", r_opts, { desc = "Open review in browser" }))
+
+    vim.keymap.set("n", "q", function()
+      M.close()
+    end, vim.tbl_extend("force", r_opts, { desc = "Close review" }))
+  end
+
+  -- C2 bottom (review threads) buffer keymaps
+  if c2 and c2.bottom_buf then
+    local rt_opts = { buffer = c2.bottom_buf, nowait = true }
+    vim.keymap.set("n", "q", function()
+      M.close()
+    end, vim.tbl_extend("force", rt_opts, { desc = "Close review" }))
   end
 end
 
@@ -984,6 +1039,9 @@ function M.close()
   state.commit_sha = nil
   state.commit_parent_sha = nil
   state.pr_files = nil
+  state.reviews = nil
+  state.comments_by_review = {}
+  state.selected_review_idx = nil
 end
 
 return M
