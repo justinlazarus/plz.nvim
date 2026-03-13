@@ -5,9 +5,6 @@ local md = require("plz.review.markdown")
 local M = {}
 
 local ns = vim.api.nvim_create_namespace("plz_review_summary")
-local SUMMARY_LINES = 5
-local SUMMARY_VIEWS = { "info", "commits", "description" }
-
 --- Reference to the shared review state table, set via M.setup().
 local state
 
@@ -22,53 +19,49 @@ function M.ns()
   return ns
 end
 
---- Return the fixed summary panel height.
-function M.lines()
-  return SUMMARY_LINES
-end
-
---- Cycle to the next summary view and re-render.
-function M.cycle_view()
-  for i, v in ipairs(SUMMARY_VIEWS) do
-    if v == state.summary_view then
-      state.summary_view = SUMMARY_VIEWS[i % #SUMMARY_VIEWS + 1]
-      break
-    end
-  end
-  M.render()
-end
-
---- Render the current summary view and resize the panel.
+--- Render based on active collection.
 function M.render()
-  if state.summary_win and vim.api.nvim_win_is_valid(state.summary_win) then
-    if state.summary_view == "commits" then
-      vim.wo[state.summary_win].cursorline = true
-    else
-      vim.wo[state.summary_win].cursorline = false
-      vim.wo[state.summary_win].winbar = nil
+  local ac = state.active_collection or 3
+  if ac == 1 then
+    local c = state.collections and state.collections[1]
+    if c then
+      M.render_info_to(c.top_buf, state.top_win)
+      M.render_commits_to(c.bottom_buf, state.bottom_win)
     end
   end
+end
 
-  if state.summary_view == "commits" then
-    M.render_commits()
-  elseif state.summary_view == "description" then
-    M.render_description()
-  else
-    M.render_info()
+--- Render info view into a specific buffer/window.
+--- @param buf number Buffer handle
+--- @param win number|nil Window handle (for options)
+function M.render_info_to(buf, win)
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
+  -- Temporarily set summary_buf so render_info writes to the right buffer
+  local orig_buf = state.summary_buf
+  state.summary_buf = buf
+  M.render_info()
+  state.summary_buf = orig_buf
+  if win and vim.api.nvim_win_is_valid(win) then
+    vim.wo[win].cursorline = false
+    vim.wo[win].winbar = nil
   end
-  -- Pad to exactly SUMMARY_LINES and enforce fixed height
-  if state.summary_buf and vim.api.nvim_buf_is_valid(state.summary_buf) then
-    local line_count = vim.api.nvim_buf_line_count(state.summary_buf)
-    if line_count < SUMMARY_LINES then
-      vim.bo[state.summary_buf].modifiable = true
-      local pad = {}
-      for _ = 1, SUMMARY_LINES - line_count do table.insert(pad, "") end
-      vim.api.nvim_buf_set_lines(state.summary_buf, -1, -1, false, pad)
-      vim.bo[state.summary_buf].modifiable = false
-    end
-  end
-  if state.summary_win and vim.api.nvim_win_is_valid(state.summary_win) then
-    vim.api.nvim_win_set_height(state.summary_win, SUMMARY_LINES)
+end
+
+--- Render commits view into a specific buffer/window.
+--- @param buf number Buffer handle
+--- @param win number|nil Window handle (for winbar/options)
+function M.render_commits_to(buf, win)
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
+  -- Temporarily set summary_buf/win so render_commits writes to the right buffer
+  local orig_buf = state.summary_buf
+  local orig_win = state.summary_win
+  state.summary_buf = buf
+  state.summary_win = win
+  M.render_commits()
+  state.summary_buf = orig_buf
+  state.summary_win = orig_win
+  if win and vim.api.nvim_win_is_valid(win) then
+    vim.wo[win].cursorline = true
   end
 end
 

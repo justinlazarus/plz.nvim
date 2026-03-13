@@ -5,7 +5,6 @@ local M = {}
 
 local ns = vim.api.nvim_create_namespace("plz_review")
 local ns_active = vim.api.nvim_create_namespace("plz_review_active")
-local SUMMARY_LINES = 5
 
 --- Reference to the shared review state table, set via M.setup().
 local state
@@ -16,58 +15,26 @@ function M.setup(state_ref)
   state = state_ref
 end
 
---- Show the summary + file list in a new tab.
-function M.show()
-  local review = require("plz.review")
-
-  vim.cmd("tabnew")
-
-  -- File list buffer first (gets full height)
-  state.buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[state.buf].buftype = "nofile"
-  vim.bo[state.buf].bufhidden = "wipe"
-  vim.bo[state.buf].filetype = "plz-review"
-
-  state.win = vim.api.nvim_get_current_win()
-  vim.api.nvim_win_set_buf(state.win, state.buf)
-
-  local file_opts = { number = false, relativenumber = false, signcolumn = "no",
-    wrap = false, foldcolumn = "0", statuscolumn = "", cursorline = true }
-  for k, v in pairs(file_opts) do vim.wo[state.win][k] = v end
-
-  -- Summary buffer above (split from full-height file list)
-  vim.cmd("aboveleft split")
-  state.summary_buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[state.summary_buf].buftype = "nofile"
-  vim.bo[state.summary_buf].bufhidden = "wipe"
-
-  state.summary_win = vim.api.nvim_get_current_win()
-  vim.api.nvim_win_set_buf(state.summary_win, state.summary_buf)
-
-  local no_interact = { number = false, relativenumber = false, signcolumn = "no",
-    wrap = false, foldcolumn = "0", statuscolumn = "", cursorline = false }
-  for k, v in pairs(no_interact) do vim.wo[state.summary_win][k] = v end
-  vim.api.nvim_win_set_height(state.summary_win, SUMMARY_LINES)
-  vim.wo[state.summary_win].winfixheight = true
-
-  -- Focus back on file list
-  vim.api.nvim_set_current_win(state.win)
-
-  review._render()
-  review._setup_keymaps()
-
-  if #state.files > 0 then
-    pcall(vim.api.nvim_win_set_cursor, state.win, { 1, 0 })
-  end
+--- Create the file list buffer (no window/tab management).
+--- @return number buf  Buffer handle
+function M.create_buf()
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].bufhidden = "hide"
+  vim.bo[buf].filetype = "plz-review"
+  state.buf = buf
+  return buf
 end
 
 --- Render the file list buffer.
 function M.render()
+  if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then return end
   local lines = {}
   local hl_regions = {}
 
-  local win_w = state.win and vim.api.nvim_win_is_valid(state.win)
-    and vim.api.nvim_win_get_width(state.win) or 90
+  local file_win = state.top_win or state.win
+  local win_w = file_win and vim.api.nvim_win_is_valid(file_win)
+    and vim.api.nvim_win_get_width(file_win) or 90
 
   local max_path = 0
   for _, file in ipairs(state.files) do
@@ -192,7 +159,8 @@ end
 --- Update the file list winbar with file position and viewed checkbox.
 function M.update_diff_status()
   if not state.current_file_idx then return end
-  if not state.win or not vim.api.nvim_win_is_valid(state.win) then return end
+  local top = state.top_win or state.win
+  if not top or not vim.api.nvim_win_is_valid(top) then return end
   local file = state.files[state.current_file_idx]
   if not file then return end
 
@@ -204,7 +172,7 @@ function M.update_diff_status()
   local pos = string.format("%d of %d", state.current_file_idx, #state.files)
   local bar = "%#PlzAccent#  " .. pos:gsub("%%", "%%%%")
     .. "  %#" .. check_hl .. "#" .. check_icon
-  vim.wo[state.win].winbar = bar
+  vim.wo[top].winbar = bar
 end
 
 return M

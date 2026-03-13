@@ -4,28 +4,32 @@ local icons = require("plz.dashboard.render").icons
 local comments = require("plz.review.comments")
 local files = require("plz.review.files")
 local summary = require("plz.review.summary")
+local layout = require("plz.review.layout")
 
 local M = {}
 
 local ns = vim.api.nvim_create_namespace("plz_review")
 local ns_active = vim.api.nvim_create_namespace("plz_review_active")
-local SUMMARY_LINES = 5
 
 local state = {
   pr = nil,
   files = {},
   base_sha = nil,
   head_sha = nil,
-  -- Summary (fixed header)
+  -- Active collection (1=info+commits, 2=placeholder, 3=files+diff)
+  active_collection = 3,
+  collections = nil,      -- populated by layout.create_initial()
+  top_win = nil,           -- shared top window
+  bottom_win = nil,        -- shared bottom window
+  -- Flat aliases (synced by layout.sync_aliases)
   summary_buf = nil,
   summary_win = nil,
-  summary_view = "info", -- "info" | "commits" | "description"
-  commits = nil,         -- fetched commit list (nil = not loaded)
-  commit_mode = false,   -- true when viewing a single commit
-  commit_sha = nil,      -- full OID of selected commit
+  commits = nil,           -- fetched commit list (nil = not loaded)
+  commit_mode = false,     -- true when viewing a single commit
+  commit_sha = nil,        -- full OID of selected commit
   commit_parent_sha = nil,
-  pr_files = nil,        -- stashed full PR file list
-  -- File list (scrollable)
+  pr_files = nil,          -- stashed full PR file list
+  -- File list (scrollable) — aliased from C3
   buf = nil,
   win = nil,
   -- Diff area
@@ -48,6 +52,7 @@ local state = {
 comments.setup(state)
 files.setup(state)
 summary.setup(state)
+layout.setup(state)
 
 --- Open review for a PR from the dashboard.
 function M.open(pr)
@@ -78,7 +83,7 @@ function M.open(pr)
       return
     end
     M._ensure_commits(function()
-      files.show()
+      layout.create_initial()
     end)
   end
 
@@ -252,7 +257,9 @@ query {
       end
     end
     -- Re-render file list to show checkboxes
-    if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
+    local c3 = state.collections and state.collections[3]
+    local file_buf = c3 and c3.top_buf or state.buf
+    if file_buf and vim.api.nvim_buf_is_valid(file_buf) then
       files.render()
       if state.current_file_idx then
         files.highlight_active()
@@ -331,20 +338,26 @@ function M._enter_commit_mode(commit)
     state.head_sha = commit.oid
     state.current_file_idx = nil
 
+    -- Switch to C3 (files) if not already there
+    if state.active_collection ~= 3 then
+      layout.switch_to(3)
+    end
+
     files.render()
     M._highlight_active_commit(commit)
 
     -- Show commit info in file list winbar
-    if state.win and vim.api.nvim_win_is_valid(state.win) then
+    local top = state.top_win or state.win
+    if top and vim.api.nvim_win_is_valid(top) then
       local short = commit.short_oid
       local msg = commit.message
       if #msg > 60 then msg = msg:sub(1, 59) .. "…" end
-      vim.wo[state.win].winbar = "%#PlzAccent#  " .. short .. "%#PlzFaint#  " .. msg:gsub("%%", "%%%%")
+      vim.wo[top].winbar = "%#PlzAccent#  " .. short .. "%#PlzFaint#  " .. msg:gsub("%%", "%%%%")
     end
 
     -- Focus file list
-    if state.win and vim.api.nvim_win_is_valid(state.win) then
-      vim.api.nvim_set_current_win(state.win)
+    if top and vim.api.nvim_win_is_valid(top) then
+      vim.api.nvim_set_current_win(top)
     end
   end)
 end
@@ -370,29 +383,31 @@ function M._exit_commit_mode()
   files.render()
 
   -- Clear file list winbar
-  if state.win and vim.api.nvim_win_is_valid(state.win) then
-    vim.wo[state.win].winbar = nil
+  local top = state.top_win or state.win
+  if top and vim.api.nvim_win_is_valid(top) then
+    vim.wo[top].winbar = nil
   end
 
   -- Clear active commit highlight
-  if state.summary_buf and vim.api.nvim_buf_is_valid(state.summary_buf) then
-    vim.api.nvim_buf_clear_namespace(state.summary_buf, ns_active, 0, -1)
+  local c1 = state.collections and state.collections[1]
+  if c1 and c1.bottom_buf and vim.api.nvim_buf_is_valid(c1.bottom_buf) then
+    vim.api.nvim_buf_clear_namespace(c1.bottom_buf, ns_active, 0, -1)
   end
 
-  -- Focus summary (commits view)
-  if state.summary_win and vim.api.nvim_win_is_valid(state.summary_win) then
-    vim.api.nvim_set_current_win(state.summary_win)
-  end
+  -- Switch to C1 (info + commits)
+  layout.switch_to(1)
 end
 
 --- Highlight the active commit row in the commits view.
 function M._highlight_active_commit(commit)
-  if not state.summary_buf or not vim.api.nvim_buf_is_valid(state.summary_buf) then return end
-  vim.api.nvim_buf_clear_namespace(state.summary_buf, ns_active, 0, -1)
+  local c1 = state.collections and state.collections[1]
+  local buf = c1 and c1.bottom_buf
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
+  vim.api.nvim_buf_clear_namespace(buf, ns_active, 0, -1)
   if state.commits then
     for i, c in ipairs(state.commits) do
       if c.oid == commit.oid then
-        pcall(vim.api.nvim_buf_set_extmark, state.summary_buf, ns_active, i - 1, 0, {
+        pcall(vim.api.nvim_buf_set_extmark, buf, ns_active, i - 1, 0, {
           line_hl_group = "CursorLine",
         })
         break
@@ -409,11 +424,14 @@ end
 
 --- Set up keymaps for the file list.
 function M._setup_keymaps()
-  local buf = state.buf
+  local c3 = state.collections and state.collections[3]
+  local buf = c3 and c3.top_buf or state.buf
   local opts = { buffer = buf, nowait = true }
 
   vim.keymap.set("n", "<CR>", function()
-    local idx = vim.api.nvim_win_get_cursor(state.win)[1]
+    local top = state.top_win or state.win
+    if not top or not vim.api.nvim_win_is_valid(top) then return end
+    local idx = vim.api.nvim_win_get_cursor(top)[1]
     if idx >= 1 and idx <= #state.files then
       M._open_diff(idx)
     end
@@ -439,12 +457,10 @@ function M._setup_keymaps()
     end
   end, vim.tbl_extend("force", opts, { desc = "Back to full PR view" }))
 
-  vim.keymap.set("n", "<Tab>", function()
-    summary.cycle_view()
-  end, vim.tbl_extend("force", opts, { desc = "Cycle summary view" }))
-
   vim.keymap.set("n", "v", function()
-    local idx = vim.api.nvim_win_get_cursor(state.win)[1]
+    local top = state.top_win or state.win
+    if not top or not vim.api.nvim_win_is_valid(top) then return end
+    local idx = vim.api.nvim_win_get_cursor(top)[1]
     local file = state.files[idx]
     if file then
       M._toggle_viewed(file.filename or file.path)
@@ -454,7 +470,9 @@ function M._setup_keymaps()
   local help_lines = {
     "plz review",
     "",
-    "<Tab>     cycle summary: Info → Commits → Description",
+    "<Tab>     next collection (Info+Commits → Placeholder → Files+Diff)",
+    "<S-Tab>   previous collection",
+    "1/2/3     jump to collection",
     "<CR>      open diff / select commit (in commits view)",
     "j/k       navigate files",
     "v         toggle file viewed",
@@ -470,40 +488,56 @@ function M._setup_keymaps()
     require("plz.help").toggle(help_lines)
   end, vim.tbl_extend("force", opts, { desc = "Toggle help" }))
 
-  -- Summary buffer keymaps
-  local s_opts = { buffer = state.summary_buf, nowait = true }
-  vim.keymap.set("n", "q", function()
-    if state.commit_mode then
-      M._exit_commit_mode()
-    else
-      M.close()
-    end
-  end, vim.tbl_extend("force", s_opts, { desc = "Close review / exit commit mode" }))
-
-  vim.keymap.set("n", "<BS>", function()
-    if state.commit_mode then
-      M._exit_commit_mode()
-    end
-  end, vim.tbl_extend("force", s_opts, { desc = "Back to full PR view" }))
-
-  vim.keymap.set("n", "<CR>", function()
-    if state.summary_view == "commits" and state.commits then
-      local row = vim.api.nvim_win_get_cursor(state.summary_win)[1]
-      if row >= 1 and row <= #state.commits then
-        M._enter_commit_mode(state.commits[row])
+  -- C1 bottom (commits) buffer keymaps
+  local c1 = state.collections and state.collections[1]
+  if c1 and c1.bottom_buf then
+    local s_opts = { buffer = c1.bottom_buf, nowait = true }
+    vim.keymap.set("n", "q", function()
+      if state.commit_mode then
+        M._exit_commit_mode()
+      else
+        M.close()
       end
-    end
-  end, vim.tbl_extend("force", s_opts, { desc = "View commit files" }))
+    end, vim.tbl_extend("force", s_opts, { desc = "Close review / exit commit mode" }))
 
-  vim.keymap.set("n", "<Tab>", function()
-    summary.cycle_view()
-  end, vim.tbl_extend("force", s_opts, { desc = "Cycle summary view" }))
+    vim.keymap.set("n", "<BS>", function()
+      if state.commit_mode then
+        M._exit_commit_mode()
+      end
+    end, vim.tbl_extend("force", s_opts, { desc = "Back to full PR view" }))
+
+    vim.keymap.set("n", "<CR>", function()
+      if state.active_collection == 1 and state.commits then
+        local win = state.bottom_win
+        if win and vim.api.nvim_win_is_valid(win) then
+          local row = vim.api.nvim_win_get_cursor(win)[1]
+          if row >= 1 and row <= #state.commits then
+            M._enter_commit_mode(state.commits[row])
+          end
+        end
+      end
+    end, vim.tbl_extend("force", s_opts, { desc = "View commit files" }))
+  end
+
+  -- C1 top (info) buffer keymaps
+  if c1 and c1.top_buf then
+    local i_opts = { buffer = c1.top_buf, nowait = true }
+    vim.keymap.set("n", "q", function()
+      M.close()
+    end, vim.tbl_extend("force", i_opts, { desc = "Close review" }))
+  end
 end
 
---- Create the split: summary + file list on top, diff area below.
+--- Create the vsplit diff area in the C3 bottom region.
 function M._create_diff_split()
-  -- Focus file list, split below
-  vim.api.nvim_set_current_win(state.win)
+  -- Close the placeholder bottom window if it exists
+  if state.bottom_win and vim.api.nvim_win_is_valid(state.bottom_win) then
+    pcall(vim.api.nvim_win_close, state.bottom_win, true)
+    state.bottom_win = nil
+  end
+
+  -- Focus file list (top window), split below
+  vim.api.nvim_set_current_win(state.top_win or state.win)
   vim.cmd("botright split")
   state.diff_lhs_win = vim.api.nvim_get_current_win()
 
@@ -511,19 +545,8 @@ function M._create_diff_split()
   vim.cmd("vsplit")
   state.diff_rhs_win = vim.api.nvim_get_current_win()
 
-  -- Calculate explicit heights
-  local total_h = vim.o.lines - vim.o.cmdheight - 2 -- tabline + statusline
-  local seps = 2 -- statuslines between summary/files and files/diff
-  local avail = total_h - SUMMARY_LINES - seps
-  local file_h = SUMMARY_LINES
-  local diff_h = avail - file_h
-
-  -- Size file list and fix it
-  vim.api.nvim_win_set_height(state.win, file_h)
-  vim.wo[state.win].winfixheight = true
-
-  -- Give remaining space to diff
-  vim.api.nvim_win_set_height(state.diff_lhs_win, diff_h)
+  -- Even split between top and diff area
+  vim.cmd("wincmd =")
 end
 
 --- Clean up old diff buffers after new ones are already displayed.
@@ -634,8 +657,9 @@ end
 
 --- Clear the file list winbar.
 function M._clear_diff_status()
-  if state.win and vim.api.nvim_win_is_valid(state.win) then
-    vim.wo[state.win].winbar = nil
+  local top = state.top_win or state.win
+  if top and vim.api.nvim_win_is_valid(top) then
+    vim.wo[top].winbar = nil
   end
 end
 
@@ -684,9 +708,7 @@ function M._setup_diff_keymaps(diff_state)
         comments.jump_comment(-1)
       end, { buffer = buf, desc = "Previous comment" })
 
-      vim.keymap.set("n", "<Tab>", function()
-        summary.cycle_view()
-      end, { buffer = buf, desc = "Cycle summary view" })
+      layout.set_collection_keymaps(buf)
     end
   end
 end
@@ -752,10 +774,11 @@ function M._open_diff(file_idx)
   files.highlight_active()
 
   -- Move file list cursor to match and ensure no trailing blank lines
-  if state.win and vim.api.nvim_win_is_valid(state.win) then
-    pcall(vim.api.nvim_win_set_cursor, state.win, { file_idx, 0 })
-    vim.api.nvim_win_call(state.win, function()
-      local win_h = vim.api.nvim_win_get_height(state.win)
+  local file_win = state.top_win or state.win
+  if file_win and vim.api.nvim_win_is_valid(file_win) then
+    pcall(vim.api.nvim_win_set_cursor, file_win, { file_idx, 0 })
+    vim.api.nvim_win_call(file_win, function()
+      local win_h = vim.api.nvim_win_get_height(file_win)
       local total = #state.files
       if total > 0 and total <= win_h then
         vim.fn.winrestview({ topline = 1 })
@@ -877,39 +900,70 @@ function M._close_diff()
 
   M._clear_diff_status()
 
-
   state.diff_lhs_win = nil
   state.diff_rhs_win = nil
   state.current_file_idx = nil
 
   -- Remove active file highlight
-  if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
-    vim.api.nvim_buf_clear_namespace(state.buf, ns_active, 0, -1)
+  local c3 = state.collections and state.collections[3]
+  local file_buf = c3 and c3.top_buf or state.buf
+  if file_buf and vim.api.nvim_buf_is_valid(file_buf) then
+    vim.api.nvim_buf_clear_namespace(file_buf, ns_active, 0, -1)
   end
 
-  -- Unfixheight so file list expands to fill remaining space
-  if state.win and vim.api.nvim_win_is_valid(state.win) then
-    vim.wo[state.win].winfixheight = false
-    vim.api.nvim_set_current_win(state.win)
+  -- Recreate placeholder bottom window and focus top
+  local top = state.top_win or state.win
+  if top and vim.api.nvim_win_is_valid(top) then
+    vim.api.nvim_set_current_win(top)
+    vim.cmd("botright split")
+    state.bottom_win = vim.api.nvim_get_current_win()
+    local scratch = vim.api.nvim_create_buf(false, true)
+    vim.bo[scratch].buftype = "nofile"
+    vim.bo[scratch].bufhidden = "wipe"
+    vim.api.nvim_win_set_buf(state.bottom_win, scratch)
+    vim.cmd("wincmd =")
+    vim.api.nvim_set_current_win(top)
   end
 end
 
 --- Close the entire review.
 function M.close()
-  M._close_diff()
-  if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
-    if #vim.api.nvim_list_tabpages() > 1 then
-      vim.cmd("tabclose")
+  -- Clean up diff buffers (without recreating bottom window)
+  M._cleanup_old_bufs(state.diff_lhs_buf, state.diff_rhs_buf)
+  state.diff_lhs_buf = nil
+  state.diff_rhs_buf = nil
+
+  -- Close all windows
+  for _, key in ipairs({ "diff_lhs_win", "diff_rhs_win", "bottom_win" }) do
+    if state[key] and vim.api.nvim_win_is_valid(state[key]) then
+      pcall(vim.api.nvim_win_close, state[key], true)
     end
-    pcall(vim.api.nvim_buf_delete, state.buf, { force = true })
   end
-  if state.summary_buf and vim.api.nvim_buf_is_valid(state.summary_buf) then
-    pcall(vim.api.nvim_buf_delete, state.summary_buf, { force = true })
+
+  -- Close tab
+  if #vim.api.nvim_list_tabpages() > 1 then
+    vim.cmd("tabclose")
   end
+
+  -- Delete all collection buffers
+  if state.collections then
+    for _, c in pairs(state.collections) do
+      for _, key in ipairs({ "top_buf", "bottom_buf" }) do
+        if c[key] and vim.api.nvim_buf_is_valid(c[key]) then
+          pcall(vim.api.nvim_buf_delete, c[key], { force = true })
+        end
+      end
+    end
+  end
+
   state.summary_buf = nil
   state.summary_win = nil
   state.buf = nil
   state.win = nil
+  state.top_win = nil
+  state.bottom_win = nil
+  state.collections = nil
+  state.active_collection = 3
   state.files = {}
   state.viewed = {}
   state.review_comments = {}
@@ -920,7 +974,6 @@ function M.close()
   state.current_file_idx = nil
   state.ado_item = nil
   state.commits = nil
-  state.summary_view = "info"
   state.commit_mode = false
   state.commit_sha = nil
   state.commit_parent_sha = nil
