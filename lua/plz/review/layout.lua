@@ -265,7 +265,7 @@ function M.switch_to(id)
 
   -- Render appropriate content
   if id == 1 then
-    summary.render_info_to(c.top_buf, state.top_win)
+    summary.render_detail_to(c.top_buf, state.top_win)
     summary.render_commits_to(c.bottom_buf, state.bottom_win)
     -- Focus bottom (commits) for interactivity
     if state.bottom_win and vim.api.nvim_win_is_valid(state.bottom_win) then

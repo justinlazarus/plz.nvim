@@ -25,7 +25,7 @@ function M.render()
   if ac == 1 then
     local c = state.collections and state.collections[1]
     if c then
-      M.render_info_to(c.top_buf, state.top_win)
+      M.render_detail_to(c.top_buf, state.top_win)
       M.render_commits_to(c.bottom_buf, state.bottom_win)
     end
   end
@@ -444,9 +444,12 @@ function M.build_ado_line(pr)
     else
       state.ado_item = { not_found = true }
     end
-    -- Re-render summary
-    if state.summary_buf and vim.api.nvim_buf_is_valid(state.summary_buf) then
-      M.render_info()
+    -- Re-render detail view if C1 is active
+    if state.active_collection == 1 then
+      local c = state.collections and state.collections[1]
+      if c and c.top_buf and vim.api.nvim_buf_is_valid(c.top_buf) then
+        M.render_detail_to(c.top_buf, state.top_win)
+      end
     end
   end)
   return line, { { 2, #line, "PlzFaint" } }
@@ -492,6 +495,184 @@ function M.format_ado_line(item)
   end
 
   return line, regions
+end
+
+--- Build the info lines (PR header) without writing to buffer.
+--- @return string[] lines
+--- @return table[] hl_regions
+function M._build_info_lines()
+  local pr = state.pr
+  local render = require("plz.dashboard.render")
+  local lines = {}
+  local hl_regions = {}
+
+  -- Line 1: PR title
+  local title_line = string.format("  PR #%d: %s", pr.number, pr.title or "")
+  table.insert(lines, title_line)
+  local pr_num_str = "  PR #" .. tostring(pr.number)
+  table.insert(hl_regions, {
+    { 0, #pr_num_str, "PlzAccent" },
+  })
+
+  -- Line 2: Status pill + branches
+  local state_icon, state_hl, state_label
+  if pr.isDraft then
+    state_icon, state_hl, state_label = icons.draft, "PlzDraft", "Draft"
+  elseif (pr.state or "") == "MERGED" then
+    state_icon, state_hl, state_label = icons.merged, "PlzMerged", "Merged"
+  elseif (pr.state or "") == "CLOSED" then
+    state_icon, state_hl, state_label = icons.closed, "PlzClosed", "Closed"
+  else
+    state_icon, state_hl, state_label = icons.open, "PlzOpen", "Open"
+  end
+  local pill = string.format(" %s %s ", state_icon, state_label)
+  local branch_line = string.format("  %s  %s ← %s",
+    pill, pr.baseRefName or "?", pr.headRefName or "?")
+  table.insert(lines, branch_line)
+  local pill_start = 2
+  local pill_end = pill_start + #pill
+  table.insert(hl_regions, {
+    { pill_start, pill_end, "PlzPill" },
+    { pill_start, pill_end, state_hl },
+    { pill_end, #branch_line, "PlzFaint" },
+  })
+
+  -- Line 3: Author + time + file count + additions/deletions
+  local author_name = (pr.author and (pr.author.name or pr.author.login)) or "?"
+  local time_ago = render._relative_time(pr.createdAt) .. " ago"
+  local total_adds, total_dels = 0, 0
+  for _, file in ipairs(state.files) do
+    total_adds = total_adds + (file.additions or 0)
+    total_dels = total_dels + (file.deletions or 0)
+  end
+  local stats = string.format("%d files", #state.files)
+  if total_adds > 0 then stats = stats .. string.format("  +%d", total_adds) end
+  if total_dels > 0 then stats = stats .. string.format("  -%d", total_dels) end
+  local meta_line = string.format("  by @%s · %s · %s", author_name, time_ago, stats)
+  table.insert(lines, meta_line)
+  local author_start = 2
+  local author_end = author_start + #("by @" .. author_name)
+  local meta_regions = {
+    { author_start, author_end, "Normal" },
+    { author_end, #meta_line, "PlzFaint" },
+  }
+  if total_adds > 0 then
+    local p = meta_line:find("+" .. tostring(total_adds))
+    if p then table.insert(meta_regions, { p - 1, p - 1 + #("+" .. tostring(total_adds)), "PlzGreen" }) end
+  end
+  if total_dels > 0 then
+    local p = meta_line:find("-" .. tostring(total_dels))
+    if p then table.insert(meta_regions, { p - 1, p - 1 + #("-" .. tostring(total_dels)), "PlzRed" }) end
+  end
+  table.insert(hl_regions, meta_regions)
+
+  -- Line 4: Reviewers
+  local reviewer_line, reviewer_regions = M._build_reviewer_line(pr)
+  table.insert(lines, reviewer_line)
+  table.insert(hl_regions, reviewer_regions)
+
+  -- Line 5: ADO work item
+  local ado_line, ado_regions = M.build_ado_line(pr)
+  table.insert(lines, ado_line)
+  table.insert(hl_regions, ado_regions)
+
+  return lines, hl_regions
+end
+
+--- Build the description lines without writing to buffer.
+--- @return string[] lines
+--- @return table[] hl_regions
+function M._build_description_lines()
+  local pr = state.pr
+  local body = pr.body or ""
+  local lines = {}
+  local hl_regions = {}
+
+  body = body:gsub("\r", "")
+  local pad = "  "
+  local in_code_block = false
+
+  if body == "" then
+    table.insert(lines, pad .. "No description provided.")
+    table.insert(hl_regions, { { 2, 28, "PlzFaint" } })
+  else
+    for _, raw in ipairs(vim.split(body, "\n", { plain = true })) do
+      if raw:match("^```") then
+        in_code_block = not in_code_block
+        table.insert(lines, "")
+        table.insert(hl_regions, {})
+      elseif in_code_block then
+        local display = pad .. "  " .. raw
+        table.insert(lines, display)
+        table.insert(hl_regions, { { #pad, #display, "PlzCode" } })
+      else
+        local display, regions = md.parse_line(raw, #pad)
+        table.insert(lines, pad .. display)
+        table.insert(hl_regions, regions)
+      end
+    end
+  end
+
+  return lines, hl_regions
+end
+
+--- Render combined info + description into the summary buffer.
+function M.render_detail()
+  local info_lines, info_hl = M._build_info_lines()
+  local desc_lines, desc_hl = M._build_description_lines()
+
+  local lines = {}
+  local hl_regions = {}
+
+  -- Info
+  vim.list_extend(lines, info_lines)
+  vim.list_extend(hl_regions, info_hl)
+
+  -- Separator
+  table.insert(lines, "")
+  table.insert(hl_regions, {})
+  local sep = "  " .. string.rep("─", 40)
+  table.insert(lines, sep)
+  table.insert(hl_regions, { { 2, #sep, "PlzFaint" } })
+  table.insert(lines, "")
+  table.insert(hl_regions, {})
+
+  -- Description
+  vim.list_extend(lines, desc_lines)
+  vim.list_extend(hl_regions, desc_hl)
+
+  -- Write
+  vim.bo[state.summary_buf].modifiable = true
+  vim.api.nvim_buf_set_lines(state.summary_buf, 0, -1, false, lines)
+  vim.bo[state.summary_buf].modifiable = false
+
+  vim.api.nvim_buf_clear_namespace(state.summary_buf, ns, 0, -1)
+  for i, regions in ipairs(hl_regions) do
+    for _, r in ipairs(regions) do
+      if r[1] < r[2] and r[1] < #lines[i] then
+        pcall(vim.api.nvim_buf_set_extmark, state.summary_buf, ns, i - 1, r[1], {
+          end_col = math.min(r[2], #lines[i]),
+          hl_group = r[3],
+        })
+      end
+    end
+  end
+end
+
+--- Render combined info + description into a specific buffer/window.
+--- @param buf number Buffer handle
+--- @param win number|nil Window handle
+function M.render_detail_to(buf, win)
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
+  local orig_buf = state.summary_buf
+  state.summary_buf = buf
+  M.render_detail()
+  state.summary_buf = orig_buf
+  if win and vim.api.nvim_win_is_valid(win) then
+    vim.wo[win].cursorline = false
+    vim.wo[win].wrap = true
+    vim.wo[win].winbar = nil
+  end
 end
 
 return M

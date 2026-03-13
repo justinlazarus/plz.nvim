@@ -519,12 +519,18 @@ function M._setup_keymaps()
     end, vim.tbl_extend("force", s_opts, { desc = "View commit files" }))
   end
 
-  -- C1 top (info) buffer keymaps
+  -- C1 top (info+description) buffer keymaps
   if c1 and c1.top_buf then
     local i_opts = { buffer = c1.top_buf, nowait = true }
     vim.keymap.set("n", "q", function()
       M.close()
     end, vim.tbl_extend("force", i_opts, { desc = "Close review" }))
+
+    vim.keymap.set("n", "o", function()
+      if state.pr and state.pr.url then
+        vim.ui.open(state.pr.url)
+      end
+    end, vim.tbl_extend("force", i_opts, { desc = "Open PR in browser" }))
   end
 end
 
