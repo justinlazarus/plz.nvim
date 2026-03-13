@@ -1,15 +1,15 @@
 local gh = require("plz.gh")
 local diff = require("plz.diff")
-local ado = require("plz.ado")
 local icons = require("plz.dashboard.render").icons
+local comments = require("plz.review.comments")
+local files = require("plz.review.files")
+local summary = require("plz.review.summary")
 
 local M = {}
 
 local ns = vim.api.nvim_create_namespace("plz_review")
 local ns_active = vim.api.nvim_create_namespace("plz_review_active")
-local ns_comments = vim.api.nvim_create_namespace("plz_review_comments")
 local SUMMARY_LINES = 5
-local parse_md_line -- forward declaration
 
 local state = {
   pr = nil,
@@ -45,6 +45,10 @@ local state = {
   expanded_comments = {}, -- "side:buf:line" -> bool, tracks which comment indicators are expanded
 }
 
+comments.setup(state)
+files.setup(state)
+summary.setup(state)
+
 --- Open review for a PR from the dashboard.
 function M.open(pr)
   local owner, repo = (pr.url or ""):match("github%.com/([^/]+)/([^/]+)")
@@ -74,18 +78,18 @@ function M.open(pr)
       return
     end
     M._ensure_commits(function()
-      M._show_file_list()
+      files.show()
     end)
   end
 
   gh.run({
     "api", string.format("repos/%s/%s/pulls/%d/files?per_page=100", owner, repo, pr.number),
-  }, function(files, err)
+  }, function(file_list, err)
     if err then
       vim.notify("plz: " .. err, vim.log.levels.ERROR)
       return
     end
-    state.files = files or {}
+    state.files = file_list or {}
     try_show()
   end)
 
@@ -97,7 +101,7 @@ function M.open(pr)
   M._fetch_viewed_states(owner, repo, pr.number)
 
   -- Fetch review comments in background
-  M._fetch_review_comments(owner, repo, pr.number)
+  comments.fetch_review_comments(owner, repo, pr.number)
 end
 
 --- Ensure the PR commits are available locally.
@@ -125,49 +129,6 @@ function M._ensure_commits(callback)
       end)
     end)
   end)
-end
-
---- Show the summary + file list in a new tab.
-function M._show_file_list()
-  vim.cmd("tabnew")
-
-  -- File list buffer first (gets full height)
-  state.buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[state.buf].buftype = "nofile"
-  vim.bo[state.buf].bufhidden = "wipe"
-  vim.bo[state.buf].filetype = "plz-review"
-
-  state.win = vim.api.nvim_get_current_win()
-  vim.api.nvim_win_set_buf(state.win, state.buf)
-
-  local file_opts = { number = false, relativenumber = false, signcolumn = "no",
-    wrap = false, foldcolumn = "0", statuscolumn = "", cursorline = true }
-  for k, v in pairs(file_opts) do vim.wo[state.win][k] = v end
-
-  -- Summary buffer above (split from full-height file list)
-  vim.cmd("aboveleft split")
-  state.summary_buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[state.summary_buf].buftype = "nofile"
-  vim.bo[state.summary_buf].bufhidden = "wipe"
-
-  state.summary_win = vim.api.nvim_get_current_win()
-  vim.api.nvim_win_set_buf(state.summary_win, state.summary_buf)
-
-  local no_interact = { number = false, relativenumber = false, signcolumn = "no",
-    wrap = false, foldcolumn = "0", statuscolumn = "", cursorline = false }
-  for k, v in pairs(no_interact) do vim.wo[state.summary_win][k] = v end
-  vim.api.nvim_win_set_height(state.summary_win, SUMMARY_LINES)
-  vim.wo[state.summary_win].winfixheight = true
-
-  -- Focus back on file list
-  vim.api.nvim_set_current_win(state.win)
-
-  M._render()
-  M._setup_keymaps()
-
-  if #state.files > 0 then
-    pcall(vim.api.nvim_win_set_cursor, state.win, { 1, 0 })
-  end
 end
 
 --- Fetch PR commits via GraphQL (mirrors gh-dash's allCommits query).
@@ -283,19 +244,19 @@ query {
 
   gh.run({ "api", "graphql", "-f", "query=" .. query }, function(data, err)
     if err then return end
-    local files = (((data or {}).data or {}).repository or {}).pullRequest
-    files = files and files.files and files.files.nodes or {}
-    for _, f in ipairs(files) do
+    local viewed_data = (((data or {}).data or {}).repository or {}).pullRequest
+    viewed_data = viewed_data and viewed_data.files and viewed_data.files.nodes or {}
+    for _, f in ipairs(viewed_data) do
       if type(f) == "table" and f.path then
         state.viewed[f.path] = (f.viewerViewedState == "VIEWED")
       end
     end
     -- Re-render file list to show checkboxes
     if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
-      M._render_files()
+      files.render()
       if state.current_file_idx then
-        M._highlight_active_file()
-        M._update_diff_status()
+        files.highlight_active()
+        files.update_diff_status()
       end
     end
   end)
@@ -319,851 +280,20 @@ mutation {
 
   -- Optimistic update
   state.viewed[file_path] = not is_viewed
-  M._render_files()
+  files.render()
   if state.current_file_idx then
-    M._highlight_active_file()
-    M._update_diff_status()
+    files.highlight_active()
+    files.update_diff_status()
   end
 
   gh.run({ "api", "graphql", "-f", "query=" .. query }, function(_data, err)
     if err then
       -- Revert on failure
       state.viewed[file_path] = is_viewed
-      M._render_files()
+      files.render()
       vim.notify("plz: failed to update viewed state", vim.log.levels.WARN)
     end
   end)
-end
-
---- Fetch review comments for the PR.
---- @param owner string
---- @param repo string
---- @param pr_number number
-function M._fetch_review_comments(owner, repo, pr_number)
-  gh.run({
-    "api", string.format("repos/%s/%s/pulls/%d/comments?per_page=100", owner, repo, pr_number),
-  }, function(comments, err)
-    if err then
-      vim.notify("plz: comments: " .. err, vim.log.levels.WARN)
-      return
-    end
-    state.review_comments = comments or {}
-    M._index_comments()
-    -- Re-render file list to show comment counts
-    if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
-      M._render_files()
-      if state.current_file_idx then
-        M._highlight_active_file()
-      end
-    end
-    -- If a diff is open, show comment indicators
-    if state.diff_rhs_buf and vim.api.nvim_buf_is_valid(state.diff_rhs_buf) then
-      M._show_comment_indicators()
-    end
-  end)
-end
-
---- Index comments by file path and line for quick lookup.
-function M._index_comments()
-  state.comments_by_file = {}
-  state.comments_by_file_left = {}
-
-  -- Group threads: top-level comments and their replies
-  local threads = {} -- in_reply_to_id or own id -> list of comments
-  local top_level = {} -- ordered list of top-level comment ids
-
-  for _, c in ipairs(state.review_comments) do
-    local thread_id = c.in_reply_to_id or c.id
-    if not threads[thread_id] then
-      threads[thread_id] = {}
-    end
-    table.insert(threads[thread_id], c)
-    if not c.in_reply_to_id then
-      table.insert(top_level, c)
-    end
-  end
-
-  for _, root in ipairs(top_level) do
-    local path = root.path or ""
-    local line = (type(root.line) == "number" and root.line)
-      or (type(root.original_line) == "number" and root.original_line)
-      or (type(root.original_position) == "number" and root.original_position)
-      or nil
-    local side = (type(root.side) == "string" and root.side) or "RIGHT"
-    if line then
-      local map = side == "LEFT" and state.comments_by_file_left or state.comments_by_file
-      if not map[path] then map[path] = {} end
-      if not map[path][line] then map[path][line] = {} end
-      table.insert(map[path][line], {
-        root = root,
-        replies = threads[root.id] or { root },
-      })
-    end
-  end
-end
-
---- Get comment count for a file.
---- @param path string
---- @return number
-function M._file_comment_count(path)
-  local count = 0
-  for _, threads in pairs(state.comments_by_file[path] or {}) do
-    count = count + #threads
-  end
-  for _, threads in pairs(state.comments_by_file_left[path] or {}) do
-    count = count + #threads
-  end
-  return count
-end
-
---- Show comment indicators (badges) on diff lines that have comments.
-function M._show_comment_indicators()
-  if not state.current_file_idx then return end
-  local file = state.files[state.current_file_idx]
-  if not file then return end
-  local path = file.filename or file.path or ""
-  local layout_mod = require("plz.diff.layout")
-
-  -- Clear previous indicators
-  if state.diff_rhs_buf and vim.api.nvim_buf_is_valid(state.diff_rhs_buf) then
-    vim.api.nvim_buf_clear_namespace(state.diff_rhs_buf, ns_comments, 0, -1)
-  end
-  if state.diff_lhs_buf and vim.api.nvim_buf_is_valid(state.diff_lhs_buf) then
-    vim.api.nvim_buf_clear_namespace(state.diff_lhs_buf, ns_comments, 0, -1)
-  end
-
-  -- Place indicators on RHS
-  local rhs_comments = state.comments_by_file[path] or {}
-  if state.diff_rhs_buf and vim.api.nvim_buf_is_valid(state.diff_rhs_buf) then
-    local rhs_nums = layout_mod._line_nums[state.diff_rhs_buf] or {}
-    for buf_line, orig_line in pairs(rhs_nums) do
-      if rhs_comments[orig_line] then
-        local thread_count = #rhs_comments[orig_line]
-        local badge = " " .. icons.comment .. " " .. thread_count .. " "
-        local key = "RIGHT:" .. state.diff_rhs_buf .. ":" .. buf_line
-        if state.expanded_comments[key] then
-          M._place_comment(state.diff_rhs_buf, state.diff_lhs_buf, buf_line, badge, rhs_comments[orig_line])
-        else
-          pcall(vim.api.nvim_buf_set_extmark, state.diff_rhs_buf, ns_comments, buf_line - 1, 0, {
-            virt_text = { { badge, "PlzPill" } },
-            virt_text_pos = "right_align",
-          })
-        end
-      end
-    end
-  end
-
-  -- Place indicators on LHS
-  local lhs_comments = state.comments_by_file_left[path] or {}
-  if state.diff_lhs_buf and vim.api.nvim_buf_is_valid(state.diff_lhs_buf) then
-    local lhs_nums = layout_mod._line_nums[state.diff_lhs_buf] or {}
-    for buf_line, orig_line in pairs(lhs_nums) do
-      if lhs_comments[orig_line] then
-        local thread_count = #lhs_comments[orig_line]
-        local badge = " " .. icons.comment .. " " .. thread_count .. " "
-        local key = "LEFT:" .. state.diff_lhs_buf .. ":" .. buf_line
-        if state.expanded_comments[key] then
-          M._place_comment(state.diff_lhs_buf, state.diff_rhs_buf, buf_line, badge, lhs_comments[orig_line])
-        else
-          pcall(vim.api.nvim_buf_set_extmark, state.diff_lhs_buf, ns_comments, buf_line - 1, 0, {
-            virt_text = { { badge, "PlzPill" } },
-            virt_text_pos = "right_align",
-          })
-        end
-      end
-    end
-  end
-end
-
---- Convert highlight regions to virt_line segments.
---- @param text string Full line text
---- @param regions table[] List of {start, end, hl_group} (byte offsets)
---- @param offset number Offset added by prefix (e.g. 1 for " ")
---- @return table[] segments for virt_lines
-function M._regions_to_segments(text, regions, offset)
-  if #regions == 0 then
-    return { { text, "Normal" } }
-  end
-  -- Sort regions by start position
-  local sorted = vim.deepcopy(regions)
-  table.sort(sorted, function(a, b) return a[1] < b[1] end)
-  local segments = {}
-  local pos = 1
-  for _, r in ipairs(sorted) do
-    local r_start = r[1] + offset
-    local r_end = r[2] + offset
-    if r_start > #text or r_end < 1 then goto skip end
-    r_start = math.max(1, r_start)
-    r_end = math.min(#text, r_end)
-    if pos < r_start then
-      table.insert(segments, { text:sub(pos, r_start - 1), "Normal" })
-    end
-    table.insert(segments, { text:sub(r_start, r_end), r[3] })
-    pos = r_end + 1
-    ::skip::
-  end
-  if pos <= #text then
-    table.insert(segments, { text:sub(pos), "Normal" })
-  end
-  return segments
-end
-
---- Highlight a code block using treesitter, returning per-line highlight info.
---- @param lines string[] Code lines
---- @param lang string Treesitter language name
---- @return table[]|nil Per-line list of {start_col, end_col, hl_group} or nil on failure
-function M._highlight_code_block(lines, lang)
-  local source = table.concat(lines, "\n")
-  local ok, parser = pcall(vim.treesitter.get_string_parser, source, lang)
-  if not ok or not parser then return nil end
-  local ok2 = pcall(function() parser:parse() end)
-  if not ok2 then return nil end
-  local tree = parser:trees()[1]
-  if not tree then return nil end
-  local ok3, query = pcall(vim.treesitter.query.get, lang, "highlights")
-  if not ok3 or not query then return nil end
-
-  local line_hls = {}
-  for i = 1, #lines do line_hls[i] = {} end
-  for id, node in query:iter_captures(tree:root(), source, 0, #lines) do
-    local name = query.captures[id]
-    local sr, sc, er, ec = node:range()
-    for row = sr, er do
-      local s = (row == sr) and sc or 0
-      local e = (row == er) and ec or #lines[row + 1]
-      if row + 1 <= #lines then
-        table.insert(line_hls[row + 1], { s, e, "@" .. name })
-      end
-    end
-  end
-  return line_hls
-end
-
---- Build virt_line segments for a code line with treesitter highlights.
---- @param line string The code line
---- @param hls table[] List of {start_col, end_col, hl_group}
---- @return table[] virt_line segments
-function M._build_code_segments(line, hls)
-  table.sort(hls, function(a, b) return a[1] < b[1] end)
-  local segments = { { "   ", "PlzCode" } }
-  local pos = 0
-  for _, hl in ipairs(hls) do
-    local s, e, group = hl[1], hl[2], hl[3]
-    if s > pos then
-      segments[#segments + 1] = { line:sub(pos + 1, s), "PlzCode" }
-    end
-    segments[#segments + 1] = { line:sub(s + 1, e), group }
-    pos = e
-  end
-  if pos < #line then
-    segments[#segments + 1] = { line:sub(pos + 1), "PlzCode" }
-  end
-  return segments
-end
-
---- Infer treesitter language from the current review file.
---- @return string|nil
-function M._infer_ts_lang()
-  local file = state.files and state.files[state.file_idx]
-  if not file then return nil end
-  local filename = file.filename or ""
-  local ok, ft = pcall(vim.filetype.match, { filename = filename })
-  if not ok or not ft then return nil end
-  -- Map filetype to treesitter lang (they sometimes differ)
-  local ok2, ts_lang = pcall(vim.treesitter.language.get_lang, ft)
-  if ok2 and ts_lang then return ts_lang end
-  return ft -- fallback: often the same
-end
-
---- Place a comment badge + expanded virtual lines below a diff line.
---- @param buf number Buffer to show comments in
---- @param other_buf number The opposite side buffer (for padding)
---- @param buf_line number 1-indexed buffer line
---- @param badge string Badge text (e.g. " 💬 1 ")
---- @param threads table[] List of comment threads at this line
-function M._place_comment(buf, other_buf, buf_line, badge, threads)
-  local render = require("plz.dashboard.render")
-  local virt_lines = {}
-  local win_w = 80
-  if buf == state.diff_rhs_buf and state.diff_rhs_win and vim.api.nvim_win_is_valid(state.diff_rhs_win) then
-    win_w = vim.api.nvim_win_get_width(state.diff_rhs_win)
-  elseif buf == state.diff_lhs_buf and state.diff_lhs_win and vim.api.nvim_win_is_valid(state.diff_lhs_win) then
-    win_w = vim.api.nvim_win_get_width(state.diff_lhs_win)
-  end
-
-  local border = string.rep("─", win_w)
-  table.insert(virt_lines, { { border, "PlzBorder" } })
-
-  for _, thread in ipairs(threads) do
-    for _, comment in ipairs(thread.replies) do
-      local author = (comment.user and comment.user.login) or "?"
-      local time_ago = render._relative_time(comment.created_at or "")
-      local header = " @" .. author .. "  " .. time_ago
-      table.insert(virt_lines, { { header, "PlzAccent" } })
-
-      -- Render body as markdown with word-wrap
-      local body = (comment.body or ""):gsub("\r", "")
-      local in_code_block = false
-      local code_block_lang = nil
-      local code_block_lines = {}
-      for _, raw_line in ipairs(vim.split(body, "\n", { plain = true })) do
-        if raw_line:match("^```") then
-          if not in_code_block then
-            in_code_block = true
-            code_block_lang = raw_line:match("^```(%S+)") or ""
-            code_block_lines = {}
-            if code_block_lang == "suggestion" then
-              -- Show original line(s) as removals before showing the replacement
-              local c_line = (type(comment.line) == "number" and comment.line)
-                or (type(comment.original_line) == "number" and comment.original_line)
-                or nil
-              local c_start = (type(comment.start_line) == "number" and comment.start_line)
-                or (type(comment.original_start_line) == "number" and comment.original_start_line)
-                or c_line
-              -- Try to read original lines from the diff buffer
-              if c_line and buf and vim.api.nvim_buf_is_valid(buf) then
-                local orig_lines = {}
-                for orig = (c_start or c_line), c_line do
-                  -- Find buffer line for this original line
-                  for bl, ol in pairs(state._line_nums or {}) do
-                    if ol == orig then
-                      local ok, bline = pcall(vim.api.nvim_buf_get_lines, buf, bl - 1, bl, false)
-                      if ok and bline[1] then
-                        table.insert(orig_lines, bline[1])
-                      end
-                      break
-                    end
-                  end
-                end
-                for _, ol in ipairs(orig_lines) do
-                  table.insert(virt_lines, { { " - ", "PlzDiffRemove" }, { vim.trim(ol), "PlzDiffRemoveLine" } })
-                end
-              end
-            else
-              local code_border = " " .. string.rep("╌", math.min(40, win_w - 4))
-              table.insert(virt_lines, { { code_border, "PlzBorder" } })
-            end
-          else
-            -- Closing fence — highlight collected code block
-            in_code_block = false
-            local ts_lang = code_block_lang
-            if ts_lang == "suggestion" or ts_lang == "" then
-              ts_lang = M._infer_ts_lang()
-            end
-            local is_suggestion = (code_block_lang == "suggestion")
-            for _, cl in ipairs(code_block_lines) do
-              if is_suggestion then
-                table.insert(virt_lines, { { " + ", "PlzDiffAdd" }, { cl, "PlzDiffAddLine" } })
-              else
-                table.insert(virt_lines, { { " │ ", "PlzBorder" }, { cl, "Normal" } })
-              end
-            end
-            local code_border = " " .. string.rep("╌", math.min(40, win_w - 4))
-            table.insert(virt_lines, { { code_border, "PlzBorder" } })
-            code_block_lang = nil
-          end
-        elseif in_code_block then
-          table.insert(code_block_lines, raw_line)
-        else
-          -- Parse markdown for this line
-          local display, regions = parse_md_line(raw_line, 1)
-          local text = " " .. display
-          -- Word wrap
-          if vim.fn.strdisplaywidth(text) <= win_w then
-            local segments = M._regions_to_segments(text, regions, 1)
-            table.insert(virt_lines, segments)
-          else
-            local remaining = text
-            while #remaining > 0 do
-              if vim.fn.strdisplaywidth(remaining) <= win_w then
-                table.insert(virt_lines, { { remaining, "Normal" } })
-                break
-              end
-              local cut = win_w - 1
-              local space = remaining:sub(1, cut):match(".*()%s")
-              if space and space > 1 then cut = space end
-              table.insert(virt_lines, { { remaining:sub(1, cut), "Normal" } })
-              remaining = " " .. remaining:sub(cut + 1)
-            end
-          end
-        end
-      end
-      table.insert(virt_lines, { { "", "Normal" } }) -- blank line between comments
-    end
-  end
-
-  table.insert(virt_lines, { { border, "PlzBorder" } })
-
-  -- Add badge + virtual lines in one extmark
-  pcall(vim.api.nvim_buf_set_extmark, buf, ns_comments, buf_line - 1, 0, {
-    virt_text = { { badge, "PlzPill" } },
-    virt_text_pos = "right_align",
-    virt_lines = virt_lines,
-    virt_lines_above = false,
-  })
-
-  -- Add matching blank padding on the other side to keep alignment
-  if other_buf and vim.api.nvim_buf_is_valid(other_buf) then
-    local padding = {}
-    for _ = 1, #virt_lines do
-      table.insert(padding, { { "", "Normal" } })
-    end
-    pcall(vim.api.nvim_buf_set_extmark, other_buf, ns_comments, buf_line - 1, 0, {
-      virt_lines = padding,
-      virt_lines_above = false,
-    })
-  end
-end
-
---- Toggle comment expansion at the cursor line.
-function M._toggle_comment_at_cursor()
-  local win = vim.api.nvim_get_current_win()
-  local buf = vim.api.nvim_win_get_buf(win)
-  local cursor_line = vim.api.nvim_win_get_cursor(win)[1] -- 1-indexed
-
-  if buf ~= state.diff_lhs_buf and buf ~= state.diff_rhs_buf then return end
-
-  local side = buf == state.diff_rhs_buf and "RIGHT" or "LEFT"
-  local key = side .. ":" .. buf .. ":" .. cursor_line
-
-  -- Check if this line has comments
-  if not state.current_file_idx then return end
-  local file = state.files[state.current_file_idx]
-  if not file then return end
-  local path = file.filename or file.path or ""
-  local layout_mod = require("plz.diff.layout")
-  local line_nums = layout_mod._line_nums[buf] or {}
-  local orig_line = line_nums[cursor_line]
-  if not orig_line then return end
-
-  local map = side == "LEFT" and state.comments_by_file_left or state.comments_by_file
-  local threads = (map[path] or {})[orig_line]
-  if not threads or #threads == 0 then return end
-
-  -- Toggle
-  state.expanded_comments[key] = not state.expanded_comments[key]
-
-  -- Re-render all indicators (clears and re-applies)
-  M._show_comment_indicators()
-end
-
---- Jump to the next or previous commented line in the current diff.
---- @param direction number 1 for next, -1 for previous
-function M._jump_comment(direction)
-  local win = vim.api.nvim_get_current_win()
-  local buf = vim.api.nvim_win_get_buf(win)
-  local cursor_line = vim.api.nvim_win_get_cursor(win)[1]
-
-  if buf ~= state.diff_lhs_buf and buf ~= state.diff_rhs_buf then return end
-  if not state.current_file_idx then return end
-
-  local file = state.files[state.current_file_idx]
-  if not file then return end
-  local path = file.filename or file.path or ""
-
-  local side = buf == state.diff_rhs_buf and "RIGHT" or "LEFT"
-  local map = side == "LEFT" and state.comments_by_file_left or state.comments_by_file
-  local file_comments = map[path] or {}
-  if vim.tbl_isempty(file_comments) then
-    vim.notify("plz: no comments in this file", vim.log.levels.INFO)
-    return
-  end
-
-  -- Build sorted list of buffer lines that have comments
-  local layout_mod = require("plz.diff.layout")
-  local line_nums = layout_mod._line_nums[buf] or {}
-  local commented_lines = {}
-  for buf_line, orig_line in pairs(line_nums) do
-    if file_comments[orig_line] then
-      table.insert(commented_lines, buf_line)
-    end
-  end
-  table.sort(commented_lines)
-
-  if #commented_lines == 0 then return end
-
-  -- Find next/prev
-  local target
-  if direction > 0 then
-    for _, line in ipairs(commented_lines) do
-      if line > cursor_line then target = line; break end
-    end
-    if not target then target = commented_lines[1] end -- wrap
-  else
-    for i = #commented_lines, 1, -1 do
-      if commented_lines[i] < cursor_line then target = commented_lines[i]; break end
-    end
-    if not target then target = commented_lines[#commented_lines] end -- wrap
-  end
-
-  -- Close the comment we're currently on (if expanded)
-  local current_key = side .. ":" .. buf .. ":" .. cursor_line
-  if state.expanded_comments[current_key] then
-    state.expanded_comments[current_key] = false
-  end
-
-  -- Open the target comment
-  local target_key = side .. ":" .. buf .. ":" .. target
-  state.expanded_comments[target_key] = true
-
-  -- Re-render and jump
-  M._show_comment_indicators()
-  pcall(vim.api.nvim_win_set_cursor, win, { target, 0 })
-end
-
---- Cycle to the next summary view and re-render.
-local SUMMARY_VIEWS = { "info", "commits", "description" }
-function M._cycle_summary_view()
-  for i, v in ipairs(SUMMARY_VIEWS) do
-    if v == state.summary_view then
-      state.summary_view = SUMMARY_VIEWS[i % #SUMMARY_VIEWS + 1]
-      break
-    end
-  end
-  M._render_summary_view()
-end
-
---- Render the current summary view and resize the panel.
-function M._render_summary_view()
-  if state.summary_win and vim.api.nvim_win_is_valid(state.summary_win) then
-    if state.summary_view == "commits" then
-      vim.wo[state.summary_win].cursorline = true
-    else
-      vim.wo[state.summary_win].cursorline = false
-      vim.wo[state.summary_win].winbar = nil
-    end
-  end
-
-  if state.summary_view == "commits" then
-    M._render_commits()
-  elseif state.summary_view == "description" then
-    M._render_description()
-  else
-    M._render_summary()
-  end
-  -- Pad to exactly SUMMARY_LINES and enforce fixed height
-  if state.summary_buf and vim.api.nvim_buf_is_valid(state.summary_buf) then
-    local line_count = vim.api.nvim_buf_line_count(state.summary_buf)
-    if line_count < SUMMARY_LINES then
-      vim.bo[state.summary_buf].modifiable = true
-      local pad = {}
-      for _ = 1, SUMMARY_LINES - line_count do table.insert(pad, "") end
-      vim.api.nvim_buf_set_lines(state.summary_buf, -1, -1, false, pad)
-      vim.bo[state.summary_buf].modifiable = false
-    end
-  end
-  if state.summary_win and vim.api.nvim_win_is_valid(state.summary_win) then
-    vim.api.nvim_win_set_height(state.summary_win, SUMMARY_LINES)
-  end
-end
-
---- Render the commits view in the summary buffer.
-function M._render_commits()
-  local render = require("plz.dashboard.render")
-  local commits = state.commits or {}
-  local lines = {}
-  local hl_regions = {}
-
-  -- Fixed column widths
-  local sha_w     = 12
-  local author_w  = 24
-  local lines_w   = 14
-  local time_w    = 6
-  local ci_w      = 10
-
-  local has_checks = false
-  for _, c in ipairs(commits) do
-    if c.checks_total > 0 then has_checks = true; break end
-  end
-
-  local win_w = state.summary_win and vim.api.nvim_win_is_valid(state.summary_win)
-    and vim.api.nvim_win_get_width(state.summary_win) or 90
-
-  --- Pad or truncate a string to exactly `w` display columns.
-  local function fit(s, w)
-    local dw = vim.fn.strdisplaywidth(s)
-    if dw > w then
-      return vim.fn.strcharpart(s, 0, w - 1) .. "…"
-    end
-    return s .. string.rep(" ", w - dw)
-  end
-
-  -- Column order: SHA, Author, +/-, Age, [Checks], Message
-  -- Header row with icon labels
-  local left_fixed = sha_w + author_w + lines_w + time_w + (has_checks and ci_w or 0)
-  local msg_w = math.max(10, win_w - 2 - left_fixed)
-
-  -- Build sticky header via winbar (statusline format)
-  local count_str = #commits .. " cmts"
-  local count_col = fit(count_str, sha_w):gsub("%%", "%%%%")
-  local rest = fit(icons.person or "", author_w)
-    .. fit(icons.lines or "", lines_w)
-    .. fit(icons.updated or "", time_w)
-  if has_checks then
-    rest = rest .. fit(icons.ci or "", ci_w)
-  end
-  rest = rest .. (icons.commit or "")
-  local winbar = "%#PlzAccent#  " .. count_col .. "%#PlzHeader#" .. rest:gsub("%%", "%%%%")
-  if state.summary_win and vim.api.nvim_win_is_valid(state.summary_win) then
-    vim.wo[state.summary_win].winbar = winbar
-  end
-
-  if #commits == 0 then
-    table.insert(lines, "  Loading…")
-    table.insert(hl_regions, { { 2, 12, "PlzFaint" } })
-  end
-
-  for _, c in ipairs(commits) do
-    local time_ago = render._relative_time(c.date)
-
-    local sha_col    = fit(c.short_oid, sha_w)
-    local author_col = fit("@" .. c.author, author_w)
-    local add_str = "+" .. render._format_number(c.additions)
-    local del_str = "-" .. render._format_number(c.deletions)
-    local lines_col  = fit(add_str .. " " .. del_str, lines_w)
-    local time_col   = fit(time_ago, time_w)
-
-    local ci_col = ""
-    local ci_icon_str = ""
-    if has_checks then
-      if c.checks_total > 0 then
-        if c.check_state == "SUCCESS" then
-          ci_icon_str = icons.ci_pass
-        elseif c.check_state == "FAILURE" or c.check_state == "ERROR" then
-          ci_icon_str = icons.ci_fail
-        else
-          ci_icon_str = icons.ci_wait
-        end
-        ci_col = fit(ci_icon_str .. " " .. c.checks_passed .. "/" .. c.checks_total, ci_w)
-      else
-        ci_col = fit("", ci_w)
-      end
-    end
-
-    local msg = c.message
-    if vim.fn.strdisplaywidth(msg) > msg_w then
-      msg = vim.fn.strcharpart(msg, 0, msg_w - 1) .. "…"
-    end
-
-    local line = "  " .. sha_col .. author_col .. lines_col .. time_col .. ci_col .. msg
-
-    table.insert(lines, line)
-
-    -- Highlights
-    local regions = {}
-    -- Left columns (SHA, author): faint
-    local faint1_end = 2 + #sha_col + #author_col
-    table.insert(regions, { 2, faint1_end, "PlzFaint" })
-    -- +/- with color
-    local add_start = faint1_end
-    local add_end = add_start + #add_str
-    table.insert(regions, { add_start, add_end, "PlzDiffAdd" })
-    local del_start = add_end + 1
-    local del_end = del_start + #del_str
-    table.insert(regions, { del_start, del_end, "PlzDiffRemove" })
-    -- Rest of lines_col + time + ci: faint
-    local left_end = faint1_end + #lines_col + #time_col + #ci_col
-    table.insert(regions, { del_end, left_end, "PlzFaint" })
-    -- CI icon color override
-    if has_checks and c.checks_total > 0 and ci_icon_str ~= "" then
-      local ci_pos = line:find(ci_icon_str, 2, true)
-      if ci_pos then
-        local ci_hl = c.check_state == "SUCCESS" and "PlzSuccess"
-          or (c.check_state == "FAILURE" or c.check_state == "ERROR") and "PlzError"
-          or "PlzWarning"
-        table.insert(regions, { ci_pos - 1, ci_pos - 1 + #ci_icon_str, ci_hl })
-      end
-    end
-
-    table.insert(hl_regions, regions)
-  end
-
-  vim.bo[state.summary_buf].modifiable = true
-  vim.api.nvim_buf_set_lines(state.summary_buf, 0, -1, false, lines)
-  vim.bo[state.summary_buf].modifiable = false
-
-  vim.api.nvim_buf_clear_namespace(state.summary_buf, ns, 0, -1)
-  for i, regions in ipairs(hl_regions) do
-    for _, r in ipairs(regions) do
-      if r[1] < r[2] and r[1] < #lines[i] then
-        pcall(vim.api.nvim_buf_set_extmark, state.summary_buf, ns, i - 1, r[1], {
-          end_col = math.min(r[2], #lines[i]),
-          hl_group = r[3],
-        })
-      end
-    end
-  end
-end
-
---- Parse a markdown line into display text and highlight regions.
---- @param raw string Raw markdown line
---- @param offset number Column offset (e.g. 2 for "  " prefix)
---- @return string display_line
---- @return table[] regions
-parse_md_line = function(raw, offset)
-  local regions = {}
-  local line = raw
-
-  -- Heading lines: # ## ### etc
-  local hashes, heading_text = line:match("^(#+)%s+(.*)")
-  if hashes then
-    local display = string.rep("  ", #hashes - 1) .. heading_text
-    table.insert(regions, { offset, offset + #display, #hashes <= 2 and "PlzAccent" or "PlzHeader" })
-    return display, regions
-  end
-
-  -- Horizontal rules
-  if line:match("^%-%-%-+$") or line:match("^%*%*%*+$") or line:match("^___+$") then
-    local display = "─────"
-    table.insert(regions, { offset, offset + #display, "PlzBorder" })
-    return display, regions
-  end
-
-  -- Checkbox list items
-  local indent, checked, rest = line:match("^(%s*)%- %[([ xX])%]%s*(.*)")
-  if indent then
-    local is_checked = checked ~= " "
-    local check_icon = is_checked and icons.ci_pass or "○"
-    local prefix = indent .. check_icon .. " "
-    -- Process inline markdown on the rest
-    local inner_display, inner_regions = parse_md_line(rest, offset + #prefix)
-    local display = prefix .. inner_display
-    local check_hl = is_checked and "PlzSuccess" or "PlzFaint"
-    table.insert(regions, { offset + #indent, offset + #indent + #check_icon, check_hl })
-    for _, r in ipairs(inner_regions) do
-      table.insert(regions, r)
-    end
-    if is_checked then
-      -- Strikethrough effect: dim the text
-      table.insert(regions, { offset + #prefix, offset + #display, "PlzFaint" })
-    end
-    return display, regions
-  end
-
-  -- Bullet list items: - or *
-  local list_indent, list_rest = line:match("^(%s*)[%-%*]%s+(.*)")
-  if list_indent then
-    local bullet = list_indent .. "• "
-    local inner_display, inner_regions = parse_md_line(list_rest, offset + #bullet)
-    return bullet .. inner_display, vim.list_extend(regions, inner_regions)
-  end
-
-  -- Inline rendering: process **bold**, *italic*, `code`, [links](url)
-  local display = ""
-  local pos = offset
-  local i = 1
-  while i <= #line do
-    -- Bold: **text**
-    if line:sub(i, i + 1) == "**" then
-      local close = line:find("**", i + 2, true)
-      if close then
-        local inner = line:sub(i + 2, close - 1)
-        table.insert(regions, { pos, pos + #inner, "PlzBold" })
-        display = display .. inner
-        pos = pos + #inner
-        i = close + 2
-        goto continue
-      end
-    end
-    -- Inline code: `text`
-    if line:sub(i, i) == "`" and line:sub(i, i + 2) ~= "```" then
-      local close = line:find("`", i + 1, true)
-      if close then
-        local inner = line:sub(i + 1, close - 1)
-        local padded = " " .. inner .. " "
-        table.insert(regions, { pos, pos + #padded, "PlzCode" })
-        display = display .. padded
-        pos = pos + #padded
-        i = close + 1
-        goto continue
-      end
-    end
-    -- Link: [text](url)
-    if line:sub(i, i) == "[" then
-      local text_end = line:find("]", i + 1, true)
-      if text_end and line:sub(text_end + 1, text_end + 1) == "(" then
-        local url_end = line:find(")", text_end + 2, true)
-        if url_end then
-          local link_text = line:sub(i + 1, text_end - 1)
-          table.insert(regions, { pos, pos + #link_text, "PlzLink" })
-          display = display .. link_text
-          pos = pos + #link_text
-          i = url_end + 1
-          goto continue
-        end
-      end
-    end
-    -- Italic: *text* (single asterisk, not bold)
-    if line:sub(i, i) == "*" and line:sub(i, i + 1) ~= "**" then
-      local close = line:find("%*", i + 1)
-      if close and line:sub(close, close + 1) ~= "**" then
-        local inner = line:sub(i + 1, close - 1)
-        table.insert(regions, { pos, pos + #inner, "PlzItalic" })
-        display = display .. inner
-        pos = pos + #inner
-        i = close + 1
-        goto continue
-      end
-    end
-    -- Regular character
-    display = display .. line:sub(i, i)
-    pos = pos + 1
-    i = i + 1
-    ::continue::
-  end
-
-  return display, regions
-end
-
---- Render the description view in the summary buffer.
-function M._render_description()
-  local pr = state.pr
-  local body = pr.body or ""
-  local lines = {}
-  local hl_regions = {}
-
-  body = body:gsub("\r", "")
-  local pad = "  "
-  local in_code_block = false
-
-  if body == "" then
-    table.insert(lines, pad .. "No description provided.")
-    table.insert(hl_regions, { { 2, 28, "PlzFaint" } })
-  else
-    for _, raw in ipairs(vim.split(body, "\n", { plain = true })) do
-      -- Code fence toggle
-      if raw:match("^```") then
-        in_code_block = not in_code_block
-        -- Skip the fence line itself
-        table.insert(lines, "")
-        table.insert(hl_regions, {})
-      elseif in_code_block then
-        local display = pad .. "  " .. raw
-        table.insert(lines, display)
-        table.insert(hl_regions, { { #pad, #display, "PlzCode" } })
-      else
-        local display, regions = parse_md_line(raw, #pad)
-        table.insert(lines, pad .. display)
-        table.insert(hl_regions, regions)
-      end
-    end
-  end
-
-  vim.bo[state.summary_buf].modifiable = true
-  vim.api.nvim_buf_set_lines(state.summary_buf, 0, -1, false, lines)
-  vim.bo[state.summary_buf].modifiable = false
-
-  vim.api.nvim_buf_clear_namespace(state.summary_buf, ns, 0, -1)
-  for i, regions in ipairs(hl_regions) do
-    for _, r in ipairs(regions) do
-      if r[1] < r[2] and r[1] < #lines[i] then
-        pcall(vim.api.nvim_buf_set_extmark, state.summary_buf, ns, i - 1, r[1], {
-          end_col = math.min(r[2], #lines[i]),
-          hl_group = r[3],
-        })
-      end
-    end
-  end
 end
 
 --- Enter commit detail mode: show files changed in a single commit.
@@ -1201,7 +331,7 @@ function M._enter_commit_mode(commit)
     state.head_sha = commit.oid
     state.current_file_idx = nil
 
-    M._render_files()
+    files.render()
     M._highlight_active_commit(commit)
 
     -- Show commit info in file list winbar
@@ -1237,7 +367,7 @@ function M._exit_commit_mode()
   state.head_sha = state.pr.headRefOid
   state.current_file_idx = nil
 
-  M._render_files()
+  files.render()
 
   -- Clear file list winbar
   if state.win and vim.api.nvim_win_is_valid(state.win) then
@@ -1271,378 +401,10 @@ function M._highlight_active_commit(commit)
   end
 end
 
---- Render the summary buffer (fixed header).
-function M._render_summary()
-  local pr = state.pr
-  local render = require("plz.dashboard.render")
-  local lines = {}
-  local hl_regions = {}
-
-  -- Line 1: PR title
-  local title_line = string.format("  PR #%d: %s", pr.number, pr.title or "")
-  table.insert(lines, title_line)
-  local pr_num_str = "  PR #" .. tostring(pr.number)
-  table.insert(hl_regions, {
-    { 0, #pr_num_str, "PlzAccent" },
-  })
-
-  -- Line 2: Status pill + branches
-  local state_icon, state_hl, state_label
-  if pr.isDraft then
-    state_icon, state_hl, state_label = icons.draft, "PlzDraft", "Draft"
-  elseif (pr.state or "") == "MERGED" then
-    state_icon, state_hl, state_label = icons.merged, "PlzMerged", "Merged"
-  elseif (pr.state or "") == "CLOSED" then
-    state_icon, state_hl, state_label = icons.closed, "PlzClosed", "Closed"
-  else
-    state_icon, state_hl, state_label = icons.open, "PlzOpen", "Open"
-  end
-  local pill = string.format(" %s %s ", state_icon, state_label)
-  local branch_line = string.format("  %s  %s ← %s",
-    pill, pr.baseRefName or "?", pr.headRefName or "?")
-  table.insert(lines, branch_line)
-  local pill_start = 2
-  local pill_end = pill_start + #pill
-  table.insert(hl_regions, {
-    { pill_start, pill_end, "PlzPill" },
-    { pill_start, pill_end, state_hl },
-    { pill_end, #branch_line, "PlzFaint" },
-  })
-
-  -- Line 3: Author + time + file count + additions/deletions
-  local author_name = (pr.author and (pr.author.name or pr.author.login)) or "?"
-  local time_ago = render._relative_time(pr.createdAt) .. " ago"
-  local total_adds, total_dels = 0, 0
-  for _, file in ipairs(state.files) do
-    total_adds = total_adds + (file.additions or 0)
-    total_dels = total_dels + (file.deletions or 0)
-  end
-  local stats = string.format("%d files", #state.files)
-  if total_adds > 0 then stats = stats .. string.format("  +%d", total_adds) end
-  if total_dels > 0 then stats = stats .. string.format("  -%d", total_dels) end
-  local meta_line = string.format("  by @%s · %s · %s", author_name, time_ago, stats)
-  table.insert(lines, meta_line)
-  -- Highlight: author bold, rest faint, +/- colored
-  local author_start = 2
-  local author_end = author_start + #("by @" .. author_name)
-  local meta_regions = {
-    { author_start, author_end, "Normal" },
-    { author_end, #meta_line, "PlzFaint" },
-  }
-  if total_adds > 0 then
-    local p = meta_line:find("+" .. tostring(total_adds))
-    if p then table.insert(meta_regions, { p - 1, p - 1 + #("+" .. tostring(total_adds)), "PlzGreen" }) end
-  end
-  if total_dels > 0 then
-    local p = meta_line:find("-" .. tostring(total_dels))
-    if p then table.insert(meta_regions, { p - 1, p - 1 + #("-" .. tostring(total_dels)), "PlzRed" }) end
-  end
-  table.insert(hl_regions, meta_regions)
-
-  -- Line 4: Reviewers
-  local reviewer_line, reviewer_regions = M._build_reviewer_line(pr)
-  table.insert(lines, reviewer_line)
-  table.insert(hl_regions, reviewer_regions)
-
-  -- Line 5: ADO work item
-  local ado_line, ado_regions = M._build_ado_line(pr)
-  table.insert(lines, ado_line)
-  table.insert(hl_regions, ado_regions)
-
-  vim.bo[state.summary_buf].modifiable = true
-  vim.api.nvim_buf_set_lines(state.summary_buf, 0, -1, false, lines)
-  vim.bo[state.summary_buf].modifiable = false
-
-  vim.api.nvim_buf_clear_namespace(state.summary_buf, ns, 0, -1)
-  for i, regions in ipairs(hl_regions) do
-    for _, r in ipairs(regions) do
-      if r[1] < r[2] then
-        pcall(vim.api.nvim_buf_set_extmark, state.summary_buf, ns, i - 1, r[1], {
-          end_col = math.min(r[2], #lines[i]),
-          hl_group = r[3],
-        })
-      end
-    end
-  end
-end
-
---- Build the reviewer line with status icons.
---- @param pr table PR data
---- @return string line
---- @return table[] hl_regions
-function M._build_reviewer_line(pr)
-  local parts = {}
-  local regions = {}
-  local pos = 2 -- start after "  "
-  local seen = {}
-
-  -- Completed reviews (latest per author)
-  local latest = {}
-  for _, review in ipairs(pr.reviews or {}) do
-    local login = review.author and review.author.login
-    if login then
-      latest[login] = review.state
-    end
-  end
-
-  for login, review_state in pairs(latest) do
-    seen[login] = true
-    local icon, hl
-    if review_state == "APPROVED" then
-      icon, hl = icons.approved, "PlzSuccess"
-    elseif review_state == "CHANGES_REQUESTED" then
-      icon, hl = icons.changes, "PlzError"
-    elseif review_state == "COMMENTED" then
-      icon, hl = icons.comment, "PlzFaint"
-    else
-      icon, hl = icons.waiting, "PlzWarning"
-    end
-
-    if #parts > 0 then
-      table.insert(parts, ", ")
-      pos = pos + 2
-    end
-    local entry = string.format("%s @%s", icon, login)
-    table.insert(parts, entry)
-    -- Icon highlight
-    local icon_len = #icon
-    table.insert(regions, { pos, pos + icon_len, hl })
-    pos = pos + #entry
-  end
-
-  -- Pending review requests (not yet reviewed)
-  for _, req in ipairs(pr.reviewRequests or {}) do
-    local login = (req.login) or (req.name) or (req.slug)
-    if login and not seen[login] then
-      seen[login] = true
-      if #parts > 0 then
-        table.insert(parts, ", ")
-        pos = pos + 2
-      end
-      local entry = string.format("%s @%s", icons.waiting, login)
-      table.insert(parts, entry)
-      local icon_len = #icons.waiting
-      table.insert(regions, { pos, pos + icon_len, "PlzWarning" })
-      pos = pos + #entry
-    end
-  end
-
-  local line = "  " .. table.concat(parts)
-  if #parts == 0 then
-    line = "  No reviewers"
-    regions = { { 2, #line, "PlzFaint" } }
-  end
-  return line, regions
-end
-
---- Build the ADO work item line.
---- @param pr table PR data
---- @return string line
---- @return table[] hl_regions
-function M._build_ado_line(pr)
-  local ab_id = ((pr.title or ""):match("AB#(%d+)") or (pr.body or ""):match("AB#(%d+)"))
-  if not ab_id then
-    return "", {}
-  end
-
-  -- Check if we already have cached ADO data
-  if state.ado_item then
-    if state.ado_item.not_found then
-      return "", {}
-    end
-    return M._format_ado_line(state.ado_item)
-  end
-
-  -- Kick off async fetch, show placeholder for now
-  local line = "  AB#" .. ab_id .. " loading…"
-  ado.fetch_work_item(ab_id, function(item, err)
-    if item then
-      state.ado_item = item
-    else
-      state.ado_item = { not_found = true }
-    end
-    -- Re-render summary
-    if state.summary_buf and vim.api.nvim_buf_is_valid(state.summary_buf) then
-      M._render_summary()
-    end
-  end)
-  return line, { { 2, #line, "PlzFaint" } }
-end
-
---- Format a resolved ADO work item line.
---- @param item table ADO work item
---- @return string line
---- @return table[] hl_regions
-function M._format_ado_line(item)
-  local ado_type = item.type or ""
-  local icon = ado_type == "Bug" and icons.ado_bug
-    or ado_type == "Task" and icons.ado_task
-    or icons.ado_story
-  local item_state = (item.state or ""):lower()
-  local icon_hl = item_state == "new" and "PlzDraft"
-    or item_state == "active" and "PlzOpen"
-    or (item_state == "resolved" or item_state == "closed") and "PlzMerged"
-    or "PlzFaint"
-
-  local prefix = icon .. " AB#" .. item.id
-  local parts = { prefix, item.state, item.assigned_to }
-  local line = "  " .. table.concat(parts, " · ")
-  local regions = {
-    { 2, 2 + #icon, icon_hl },
-    { 2 + #icon, #line, "PlzFaint" },
-  }
-
-  -- Render tags as pills
-  if item.tags and item.tags ~= "" then
-    local tag_list = vim.split(item.tags, ";%s*")
-    for _, tag in ipairs(tag_list) do
-      local trimmed = vim.trim(tag)
-      if trimmed ~= "" then
-        local pill = " " .. trimmed .. " "
-        line = line .. "  " .. pill
-        local pill_start = #line - #pill
-        local pill_end = #line
-        table.insert(regions, { pill_start, pill_end, "PlzPill" })
-        table.insert(regions, { pill_start, pill_end, "PlzFaint" })
-      end
-    end
-  end
-
-  return line, regions
-end
-
---- Render the file list buffer.
-function M._render_files()
-  local lines = {}
-  local hl_regions = {}
-
-  local win_w = state.win and vim.api.nvim_win_is_valid(state.win)
-    and vim.api.nvim_win_get_width(state.win) or 90
-
-  local max_path = 0
-  for _, file in ipairs(state.files) do
-    local path = file.filename or file.path or ""
-    if #path > max_path then max_path = #path end
-  end
-  -- prefix: 2 + check(4) + cmt(6) + icon(4) + add(6) + del(6) = 28
-  max_path = math.min(max_path, win_w - 28)
-
-  for _, file in ipairs(state.files) do
-    local path = file.filename or file.path or "?"
-    local status = file.status or "modified"
-    local adds = file.additions or 0
-    local dels = file.deletions or 0
-
-    local viewed = state.viewed[path]
-    local check = viewed and icons.ci_pass or "○"
-    local check_hl = viewed and "PlzSuccess" or "PlzFaint"
-
-    local icon, icon_hl
-    if status == "added" then
-      icon, icon_hl = "A", "PlzGreen"
-    elseif status == "removed" then
-      icon, icon_hl = "D", "PlzRed"
-    elseif status == "renamed" then
-      icon, icon_hl = "R", "PlzYellow"
-    elseif status == "copied" then
-      icon, icon_hl = "C", "PlzYellow"
-    else
-      icon, icon_hl = "M", "PlzYellow"
-    end
-
-    local display_path = path
-    if #path > max_path then
-      display_path = "…" .. path:sub(-(max_path - 1))
-    end
-
-    local adds_str = adds > 0 and string.format("+%d", adds) or ""
-    local dels_str = dels > 0 and string.format("-%d", dels) or ""
-
-    local comment_count = M._file_comment_count(path)
-    local comment_str = comment_count > 0 and (icons.comment .. " " .. comment_count) or ""
-
-    -- Fixed column widths
-    local check_w  = 4   -- "○ " or "✓ " + padding
-    local cmt_w    = 6   -- "💬 3" or blank
-    local icon_w   = 4   -- "M  "
-    local add_w    = 6   -- "+123  "
-    local del_w    = 6   -- "-123  "
-    -- path fills remainder
-
-    local function fit(s, w)
-      local dw = vim.fn.strdisplaywidth(s)
-      if dw >= w then return s end
-      return s .. string.rep(" ", w - dw)
-    end
-
-    local c_check   = fit(check, check_w)
-    local c_cmt     = fit(comment_str, cmt_w)
-    local c_icon    = fit(icon, icon_w)
-    local c_add     = fit(adds_str, add_w)
-    local c_del     = fit(dels_str, del_w)
-
-    local row = "  " .. c_check .. c_cmt .. c_icon .. c_add .. c_del .. display_path
-    table.insert(lines, row)
-
-    -- Highlights
-    local row_regions = {}
-    local p = 2
-    -- check
-    table.insert(row_regions, { p, p + #check, check_hl })
-    p = p + #c_check
-    -- comment
-    if comment_count > 0 then
-      table.insert(row_regions, { p, p + #comment_str, "PlzFaint" })
-    end
-    p = p + #c_cmt
-    -- icon
-    table.insert(row_regions, { p, p + #icon, icon_hl })
-    p = p + #c_icon
-    -- adds
-    if adds > 0 then
-      table.insert(row_regions, { p, p + #adds_str, "PlzGreen" })
-    end
-    p = p + #c_add
-    -- dels
-    if dels > 0 then
-      table.insert(row_regions, { p, p + #dels_str, "PlzRed" })
-    end
-    table.insert(hl_regions, row_regions)
-  end
-
-  vim.bo[state.buf].modifiable = true
-  vim.api.nvim_buf_set_lines(state.buf, 0, -1, false, lines)
-  vim.bo[state.buf].modifiable = false
-
-  vim.api.nvim_buf_clear_namespace(state.buf, ns, 0, -1)
-  for i, regions in ipairs(hl_regions) do
-    for _, r in ipairs(regions) do
-      if r[1] < r[2] then
-        pcall(vim.api.nvim_buf_set_extmark, state.buf, ns, i - 1, r[1], {
-          end_col = math.min(r[2], #lines[i]),
-          hl_group = r[3],
-        })
-      end
-    end
-  end
-end
-
 --- Render both summary and file list.
 function M._render()
-  M._render_summary_view()
-  M._render_files()
-end
-
---- Highlight the active file row in the file list.
-function M._highlight_active_file()
-  if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then return end
-  vim.api.nvim_buf_clear_namespace(state.buf, ns_active, 0, -1)
-  if state.current_file_idx then
-    local row = state.current_file_idx - 1  -- 0-indexed, no header offset
-    pcall(vim.api.nvim_buf_set_extmark, state.buf, ns_active, row, 0, {
-      line_hl_group = "CursorLine",
-    })
-  end
+  summary.render()
+  files.render()
 end
 
 --- Set up keymaps for the file list.
@@ -1678,7 +440,7 @@ function M._setup_keymaps()
   end, vim.tbl_extend("force", opts, { desc = "Back to full PR view" }))
 
   vim.keymap.set("n", "<Tab>", function()
-    M._cycle_summary_view()
+    summary.cycle_view()
   end, vim.tbl_extend("force", opts, { desc = "Cycle summary view" }))
 
   vim.keymap.set("n", "v", function()
@@ -1734,7 +496,7 @@ function M._setup_keymaps()
   end, vim.tbl_extend("force", s_opts, { desc = "View commit files" }))
 
   vim.keymap.set("n", "<Tab>", function()
-    M._cycle_summary_view()
+    summary.cycle_view()
   end, vim.tbl_extend("force", s_opts, { desc = "Cycle summary view" }))
 end
 
@@ -1860,32 +622,14 @@ function M._populate_diff(data)
   M._setup_diff_keymaps(diff_state)
 
   -- Show file position
-  M._update_diff_status()
+  files.update_diff_status()
 
   -- Show comment indicators
   state.expanded_comments = {}
-  M._show_comment_indicators()
+  comments.show_comment_indicators()
 
   -- Focus the RHS (new code) window
   vim.api.nvim_set_current_win(state.diff_rhs_win)
-end
-
---- Update the file list winbar with file position and viewed checkbox.
-function M._update_diff_status()
-  if not state.current_file_idx then return end
-  if not state.win or not vim.api.nvim_win_is_valid(state.win) then return end
-  local file = state.files[state.current_file_idx]
-  if not file then return end
-
-  local path = file.filename or file.path or "?"
-  local viewed = state.viewed[path]
-  local check_icon = viewed and icons.ci_pass or "○"
-  local check_hl = viewed and "PlzSuccess" or "PlzFaint"
-
-  local pos = string.format("%d of %d", state.current_file_idx, #state.files)
-  local bar = "%#PlzAccent#  " .. pos:gsub("%%", "%%%%")
-    .. "  %#" .. check_hl .. "#" .. check_icon
-  vim.wo[state.win].winbar = bar
 end
 
 --- Clear the file list winbar.
@@ -1929,19 +673,19 @@ function M._setup_diff_keymaps(diff_state)
       end, { buffer = buf, desc = "Toggle viewed" })
 
       vim.keymap.set("n", "c", function()
-        M._toggle_comment_at_cursor()
+        comments.toggle_comment_at_cursor()
       end, { buffer = buf, desc = "Toggle comment" })
 
       vim.keymap.set("n", "]c", function()
-        M._jump_comment(1)
+        comments.jump_comment(1)
       end, { buffer = buf, desc = "Next comment" })
 
       vim.keymap.set("n", "[c", function()
-        M._jump_comment(-1)
+        comments.jump_comment(-1)
       end, { buffer = buf, desc = "Previous comment" })
 
       vim.keymap.set("n", "<Tab>", function()
-        M._cycle_summary_view()
+        summary.cycle_view()
       end, { buffer = buf, desc = "Cycle summary view" })
     end
   end
@@ -2005,7 +749,7 @@ function M._open_diff(file_idx)
   state.current_file_idx = file_idx
 
   -- Update active file indicator
-  M._highlight_active_file()
+  files.highlight_active()
 
   -- Move file list cursor to match and ensure no trailing blank lines
   if state.win and vim.api.nvim_win_is_valid(state.win) then
