@@ -19,6 +19,7 @@ local state = {
   prev_buf = nil, -- buffer to restore on close
   filter_overrides = {}, -- per-tab session filter overrides
   repo_name = nil, -- "owner/repo" fetched on open
+  last_fetched = nil, -- os.time() of last PR list fetch
   editing_filter = false,
   filter_buf = nil, -- 1-line scratch buffer for filter editing
   fetch_gen = 0, -- generation counter to ignore stale fetch callbacks
@@ -102,16 +103,35 @@ function M._write_header()
   end
 end
 
+--- Format a relative time string from an os.time() timestamp.
+local function relative_ago(ts)
+  if not ts then return "" end
+  local diff = os.difftime(os.time(), ts)
+  if diff < 60 then return "Updated just now"
+  elseif diff < 3600 then return "Updated ~" .. math.floor(diff / 60) .. "m ago"
+  elseif diff < 86400 then return "Updated ~" .. math.floor(diff / 3600) .. "h ago"
+  else return "Updated ~" .. math.floor(diff / 86400) .. "d ago"
+  end
+end
+
+--- Statusline expression evaluated on every redraw (keeps "Updated" time fresh).
+function _G.PlzDashboardStatusLine()
+  local repo = state.repo_name or ""
+  local left = "%#PlzStatusLine# \xef\x93\x89"
+  if repo ~= "" then
+    left = left .. " %#PlzStatusFaint#\xef\x90\x81 " .. repo:gsub("%%", "%%%%")
+  end
+  local right = relative_ago(state.last_fetched)
+  if right ~= "" then
+    right = "%#PlzStatusFaint#" .. right .. " "
+  end
+  return left .. "%=" .. right
+end
+
 --- Update the statusline on the dashboard window.
 function M._update_statusline()
   if not state.list_win or not vim.api.nvim_win_is_valid(state.list_win) then return end
-  local repo = state.repo_name or ""
-  local stl = "%#PlzStatusLine# \xf3\xb0\x90\x87"
-  if repo ~= "" then
-    stl = stl .. " %#PlzStatusFaint#" .. repo:gsub("%%", "%%%%")
-  end
-  stl = stl .. "%="
-  vim.wo[state.list_win].statusline = stl
+  vim.wo[state.list_win].statusline = "%{%v:lua.PlzDashboardStatusLine()%}"
 end
 
 --- Open the plz dashboard.
@@ -405,8 +425,10 @@ function M._fetch_tab_with_filter(idx, limit)
     end
     state.prs = prs or {}
     state.has_more = #state.prs >= state.current_limit
+    state.last_fetched = os.time()
     M._render_rows()
     M._fetch_ado_batch()
+    M._update_statusline()
   end)
 end
 

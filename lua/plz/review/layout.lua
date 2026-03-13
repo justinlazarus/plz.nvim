@@ -9,18 +9,34 @@ function M.setup(state_ref)
   state = state_ref
 end
 
---- Build the plz statusline string, including repo name if available.
-function M.plz_statusline()
+--- Statusline expression evaluated on every redraw (keeps "Updated" time fresh).
+function _G.PlzReviewStatusLine()
   local repo = ""
   if state and state.pr and state.pr.url then
     local owner, name = state.pr.url:match("github%.com/([^/]+)/([^/]+)")
     if owner and name then repo = owner .. "/" .. name end
   end
-  local stl = "%#PlzStatusLine# \xf3\xb0\x90\x87"
+  local left = "%#PlzStatusLine# \xef\x93\x89"
   if repo ~= "" then
-    stl = stl .. " %#PlzStatusFaint#" .. repo:gsub("%%", "%%%%")
+    left = left .. " %#PlzStatusFaint#\xef\x90\x81 " .. repo:gsub("%%", "%%%%")
   end
-  return stl .. "%="
+  local right = ""
+  if state and state.last_fetched then
+    local diff = os.difftime(os.time(), state.last_fetched)
+    local ago
+    if diff < 60 then ago = "just now"
+    elseif diff < 3600 then ago = "~" .. math.floor(diff / 60) .. "m ago"
+    elseif diff < 86400 then ago = "~" .. math.floor(diff / 3600) .. "h ago"
+    else ago = "~" .. math.floor(diff / 86400) .. "d ago"
+    end
+    right = "%#PlzStatusFaint#Updated " .. ago .. " "
+  end
+  return left .. "%=" .. right
+end
+
+--- Return the plz statusline expression string for review windows.
+function M.plz_statusline()
+  return "%{%v:lua.PlzReviewStatusLine()%}"
 end
 
 --- Standard window options for non-interactive panels.

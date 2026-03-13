@@ -52,6 +52,7 @@ local state = {
   reviews = nil,             -- fetched review submissions (nil = not loaded)
   comments_by_review = {},   -- review_id -> [comments]
   selected_review_idx = nil, -- currently selected review in C2
+  last_fetched = nil,        -- os.time() when PR detail was loaded
 }
 
 comments.setup(state)
@@ -89,6 +90,7 @@ function M.open(pr)
       vim.notify("plz: no changed files", vim.log.levels.INFO)
       return
     end
+    state.last_fetched = os.time()
     M._ensure_commits(function()
       layout.create_initial()
     end)

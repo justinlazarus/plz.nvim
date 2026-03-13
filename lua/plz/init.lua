@@ -77,7 +77,7 @@ function M.setup(opts)
   -- Plz statusline: disable statusline plugins while in plz buffers.
   -- Works universally by temporarily hiding lualine/etc. via their
   -- hide() API, falling back to a timer-based override.
-  local plz_stl = "%#PlzStatusLine# \xf3\xb0\x90\x87%="
+  local plz_stl = "%#PlzStatusLine# \xef\x93\x89%="
   local stl_hidden = false
 
   local saved_laststatus
