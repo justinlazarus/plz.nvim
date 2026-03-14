@@ -172,6 +172,7 @@ function M.update_diff_status()
   local pos = string.format("%d of %d", state.current_file_idx, #state.files)
   local bar = "%#PlzAccent#  " .. pos:gsub("%%", "%%%%")
     .. "  %#" .. check_hl .. "#" .. check_icon
+    .. "%=%#PlzFaint#Change Detail  "
   vim.wo[top].winbar = bar
 end
 

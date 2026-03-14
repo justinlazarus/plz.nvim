@@ -51,7 +51,9 @@ local state = {
   -- Reviews (C2)
   reviews = nil,             -- fetched review submissions (nil = not loaded)
   comments_by_review = {},   -- review_id -> [comments]
-  selected_review_idx = nil, -- currently selected review in C2
+  c2_items = {},             -- deduplicated thread+review list for C2 top
+  thread_resolved = {},      -- root_comment_id -> bool (from GraphQL)
+  selected_review_idx = nil, -- currently selected item in C2
   last_fetched = nil,        -- os.time() when PR detail was loaded
 }
 
@@ -119,6 +121,9 @@ function M.open(pr)
 
   -- Fetch review submissions in background
   review_detail.fetch_reviews(owner, repo, pr.number)
+
+  -- Fetch thread resolution status via GraphQL
+  review_detail.fetch_thread_resolution(owner, repo, pr.number)
 end
 
 --- Ensure the PR commits are available locally.
@@ -465,31 +470,31 @@ function M._setup_keymaps()
 
     vim.keymap.set("n", "<CR>", function()
       if state.active_collection ~= 2 then return end
-      local reviews = state.reviews or {}
-      if #reviews == 0 then return end
+      local items = state.c2_items or {}
+      if #items == 0 then return end
       local win = state.top_win
       if not win or not vim.api.nvim_win_is_valid(win) then return end
       local row = vim.api.nvim_win_get_cursor(win)[1]
-      if row >= 1 and row <= #reviews then
+      if row >= 1 and row <= #items then
         state.selected_review_idx = row
         review_detail.render_threads(c2.bottom_buf, state.bottom_win, row)
       end
-    end, vim.tbl_extend("force", r_opts, { desc = "Select review" }))
+    end, vim.tbl_extend("force", r_opts, { desc = "Select thread" }))
 
     vim.keymap.set("n", "o", function()
       if state.active_collection ~= 2 then return end
-      local reviews = state.reviews or {}
-      if #reviews == 0 then return end
+      local items = state.c2_items or {}
+      if #items == 0 then return end
       local win = state.top_win
       if not win or not vim.api.nvim_win_is_valid(win) then return end
       local row = vim.api.nvim_win_get_cursor(win)[1]
-      local review = reviews[row]
-      if review and review.html_url then
-        vim.ui.open(review.html_url)
+      local item = items[row]
+      if item and item.type == "review" and item.review.html_url then
+        vim.ui.open(item.review.html_url)
       elseif state.pr and state.pr.url then
         vim.ui.open(state.pr.url)
       end
-    end, vim.tbl_extend("force", r_opts, { desc = "Open review in browser" }))
+    end, vim.tbl_extend("force", r_opts, { desc = "Open in browser" }))
 
     vim.keymap.set("n", "q", function()
       M.close()
@@ -588,6 +593,8 @@ function M.close()
   state.pr_files = nil
   state.reviews = nil
   state.comments_by_review = {}
+  state.c2_items = {}
+  state.thread_resolved = {}
   state.selected_review_idx = nil
 end
 

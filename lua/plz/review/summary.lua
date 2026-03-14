@@ -112,6 +112,7 @@ function M.render_commits()
   end
   rest = rest .. (icons.commit or "")
   local winbar = "%#PlzAccent#  " .. count_col .. "%#PlzHeader#" .. rest:gsub("%%", "%%%%")
+    .. "%=%#PlzFaint#PR Detail  "
   if state.summary_win and vim.api.nvim_win_is_valid(state.summary_win) then
     vim.wo[state.summary_win].winbar = winbar
   end
@@ -583,44 +584,9 @@ end
 --- Build the description lines without writing to buffer.
 --- @return string[] lines
 --- @return table[] hl_regions
-function M._build_description_lines()
-  local pr = state.pr
-  local body = pr.body or ""
-  local lines = {}
-  local hl_regions = {}
-
-  body = body:gsub("\r", "")
-  local pad = "  "
-  local in_code_block = false
-
-  if body == "" then
-    table.insert(lines, pad .. "No description provided.")
-    table.insert(hl_regions, { { 2, 28, "PlzFaint" } })
-  else
-    for _, raw in ipairs(vim.split(body, "\n", { plain = true })) do
-      if raw:match("^```") then
-        in_code_block = not in_code_block
-        table.insert(lines, "")
-        table.insert(hl_regions, {})
-      elseif in_code_block then
-        local display = pad .. "  " .. raw
-        table.insert(lines, display)
-        table.insert(hl_regions, { { #pad, #display, "PlzCode" } })
-      else
-        local display, regions = md.parse_line(raw, #pad)
-        table.insert(lines, pad .. display)
-        table.insert(hl_regions, regions)
-      end
-    end
-  end
-
-  return lines, hl_regions
-end
-
 --- Render combined info + description into the summary buffer.
 function M.render_detail()
   local info_lines, info_hl = M._build_info_lines()
-  local desc_lines, desc_hl = M._build_description_lines()
 
   local lines = {}
   local hl_regions = {}
@@ -638,20 +604,37 @@ function M.render_detail()
   table.insert(lines, "")
   table.insert(hl_regions, {})
 
-  -- Description
-  vim.list_extend(lines, desc_lines)
-  vim.list_extend(hl_regions, desc_hl)
+  -- Description: raw markdown with HTML comments stripped
+  local body = (state.pr.body or ""):gsub("\r", "")
+  body = body:gsub("<!%-%-.-%-%->", "")
+  -- Collapse runs of 3+ blank lines into 2
+  body = body:gsub("\n\n\n+", "\n\n")
+  body = vim.trim(body)
+  if body == "" then
+    table.insert(lines, "No description provided.")
+    table.insert(hl_regions, { { 0, 26, "PlzFaint" } })
+  else
+    for _, raw in ipairs(vim.split(body, "\n", { plain = true })) do
+      table.insert(lines, raw)
+      table.insert(hl_regions, {})
+    end
+  end
 
   -- Write
-  vim.bo[state.summary_buf].modifiable = true
-  vim.api.nvim_buf_set_lines(state.summary_buf, 0, -1, false, lines)
-  vim.bo[state.summary_buf].modifiable = false
+  local buf = state.summary_buf
+  vim.bo[buf].modifiable = true
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
 
-  vim.api.nvim_buf_clear_namespace(state.summary_buf, ns, 0, -1)
+  -- Start treesitter markdown highlighting on the buffer
+  pcall(vim.treesitter.start, buf, "markdown")
+
+  -- Apply info section highlights (above separator only)
+  vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   for i, regions in ipairs(hl_regions) do
     for _, r in ipairs(regions) do
       if r[1] < r[2] and r[1] < #lines[i] then
-        pcall(vim.api.nvim_buf_set_extmark, state.summary_buf, ns, i - 1, r[1], {
+        pcall(vim.api.nvim_buf_set_extmark, buf, ns, i - 1, r[1], {
           end_col = math.min(r[2], #lines[i]),
           hl_group = r[3],
         })

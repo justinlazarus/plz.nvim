@@ -30,14 +30,9 @@ function _G.PlzReviewStatusLine()
       end
       local prnum = state.pr and state.pr.number or ""
       left = left .. "%#PlzStatusPill# \xef\x90\x87 " .. prnum .. " %#PlzStatusRepo# commit " .. idx .. " of " .. #state.commits .. " %#PlzStatusLine#"
-    elseif ac == 2 and state.reviews and #state.reviews > 0 then
-      local idx = 1
-      if state.top_win and vim.api.nvim_win_is_valid(state.top_win) then
-        local row = vim.api.nvim_win_get_cursor(state.top_win)[1]
-        if row >= 1 and row <= #state.reviews then idx = row end
-      end
+    elseif ac == 2 and state.c2_items and #state.c2_items > 0 then
       local prnum = state.pr and state.pr.number or ""
-      left = left .. "%#PlzStatusPill# \xef\x90\x87 " .. prnum .. " %#PlzStatusRepo# review " .. idx .. " of " .. #state.reviews .. " %#PlzStatusLine#"
+      left = left .. "%#PlzStatusPill# \xef\x90\x87 " .. prnum .. " %#PlzStatusRepo# " .. #state.c2_items .. " items %#PlzStatusLine#"
     elseif ac == 3 and state.files and #state.files > 0 then
       local idx = state.current_file_idx or 1
       if state.top_win and vim.api.nvim_win_is_valid(state.top_win) then
@@ -360,8 +355,8 @@ function M.switch_to(id)
   elseif id == 2 then
     local review_detail = require("plz.review.collections.review_detail")
     review_detail.render_reviews(c.top_buf, state.top_win)
-    -- Show first review's threads if available
-    if state.reviews and #state.reviews > 0 then
+    -- Show first item's detail if available
+    if state.c2_items and #state.c2_items > 0 then
       state.selected_review_idx = state.selected_review_idx or 1
       review_detail.render_threads(c.bottom_buf, state.bottom_win, state.selected_review_idx)
     end
