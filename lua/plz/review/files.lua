@@ -127,6 +127,23 @@ function M.render()
     table.insert(hl_regions, row_regions)
   end
 
+  -- Set winbar with column icons matching row layout
+  local file_win = state.top_win or state.win
+  if file_win and vim.api.nvim_win_is_valid(file_win) then
+    local function hfit(s, w)
+      local dw = vim.fn.strdisplaywidth(s)
+      if dw >= w then return s end
+      return s .. string.rep(" ", w - dw)
+    end
+    local hdr = hfit(icons.ci_pass, 4)
+      .. hfit(icons.comments, 6)
+      .. hfit(icons.dot, 4)
+      .. hfit(icons.lines, 12)
+    local winbar = "%#PlzHeader#  " .. hdr:gsub("%%", "%%%%")
+      .. "%=%#PlzFaint#Change Detail  "
+    vim.wo[file_win].winbar = winbar
+  end
+
   vim.bo[state.buf].modifiable = true
   vim.api.nvim_buf_set_lines(state.buf, 0, -1, false, lines)
   vim.bo[state.buf].modifiable = false
@@ -156,24 +173,11 @@ function M.highlight_active()
   end
 end
 
---- Update the file list winbar with file position and viewed checkbox.
+--- Refresh statusline to reflect current file position and viewed state.
+--- (Position and viewed count are now shown in the global plz statusline.)
 function M.update_diff_status()
   if not state.current_file_idx then return end
-  local top = state.top_win or state.win
-  if not top or not vim.api.nvim_win_is_valid(top) then return end
-  local file = state.files[state.current_file_idx]
-  if not file then return end
-
-  local path = file.filename or file.path or "?"
-  local viewed = state.viewed[path]
-  local check_icon = viewed and icons.ci_pass or "○"
-  local check_hl = viewed and "PlzSuccess" or "PlzFaint"
-
-  local pos = string.format("%d of %d", state.current_file_idx, #state.files)
-  local bar = "%#PlzAccent#  " .. pos:gsub("%%", "%%%%")
-    .. "  %#" .. check_hl .. "#" .. check_icon
-    .. "%=%#PlzFaint#Change Detail  "
-  vim.wo[top].winbar = bar
+  vim.cmd("redrawstatus")
 end
 
 return M

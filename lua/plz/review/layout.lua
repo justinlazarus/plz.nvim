@@ -31,8 +31,13 @@ function _G.PlzReviewStatusLine()
       local prnum = state.pr and state.pr.number or ""
       left = left .. "%#PlzStatusPill# \xef\x90\x87 " .. prnum .. " %#PlzStatusRepo# commit " .. idx .. " of " .. #state.commits .. " %#PlzStatusLine#"
     elseif ac == 2 and state.c2_items and #state.c2_items > 0 then
+      local idx = 1
+      if state.top_win and vim.api.nvim_win_is_valid(state.top_win) then
+        local row = vim.api.nvim_win_get_cursor(state.top_win)[1]
+        if row >= 1 and row <= #state.c2_items then idx = row end
+      end
       local prnum = state.pr and state.pr.number or ""
-      left = left .. "%#PlzStatusPill# \xef\x90\x87 " .. prnum .. " %#PlzStatusRepo# " .. #state.c2_items .. " items %#PlzStatusLine#"
+      left = left .. "%#PlzStatusPill# \xef\x90\x87 " .. prnum .. " %#PlzStatusRepo# item " .. idx .. " of " .. #state.c2_items .. " %#PlzStatusLine#"
     elseif ac == 3 and state.files and #state.files > 0 then
       local idx = state.current_file_idx or 1
       if state.top_win and vim.api.nvim_win_is_valid(state.top_win) then
@@ -40,7 +45,26 @@ function _G.PlzReviewStatusLine()
         if row >= 1 and row <= #state.files then idx = row end
       end
       local prnum = state.pr and state.pr.number or ""
-      left = left .. "%#PlzStatusPill# \xef\x90\x87 " .. prnum .. " %#PlzStatusRepo# file " .. idx .. " of " .. #state.files .. " %#PlzStatusLine#"
+      left = left .. "%#PlzStatusPill# \xef\x90\x87 " .. prnum .. " %#PlzStatusRepo# file " .. idx .. " of " .. #state.files
+      -- Viewed count
+      local viewed_count = 0
+      if state.viewed then
+        for _, f in ipairs(state.files) do
+          local path = f.filename or f.path or ""
+          if state.viewed[path] then viewed_count = viewed_count + 1 end
+        end
+      end
+      left = left .. "  " .. viewed_count .. " viewed"
+      -- +/- totals
+      local total_adds, total_dels = 0, 0
+      for _, f in ipairs(state.files) do
+        total_adds = total_adds + (f.additions or 0)
+        total_dels = total_dels + (f.deletions or 0)
+      end
+      left = left .. " %#PlzStatusLine#"
+      if total_adds > 0 or total_dels > 0 then
+        left = left .. "%#PlzGreen#+" .. total_adds .. " %#PlzRed#-" .. total_dels .. " %#PlzStatusLine#"
+      end
     end
   end
   local right = ""
@@ -207,7 +231,8 @@ function M.resize_top_to_content()
   local top_h = vim.api.nvim_win_get_height(state.top_win)
   local bot_h = vim.api.nvim_win_get_height(bottom_win)
   local total = top_h + bot_h
-  local max_top = math.floor(total / 2)
+  local ratio = (state.active_collection == 3) and 0.2 or 0.5
+  local max_top = math.floor(total * ratio)
   local content_lines = vim.api.nvim_buf_line_count(
     vim.api.nvim_win_get_buf(state.top_win))
   -- Winbar occupies 1 row of window height, add it if present

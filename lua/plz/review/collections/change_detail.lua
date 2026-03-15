@@ -198,12 +198,9 @@ function M.populate_diff(data)
   state._suppress_diff_focus = nil
 end
 
---- Clear the file list winbar.
+--- Refresh the statusline after diff state changes.
 function M.clear_diff_status()
-  local top = state.top_win or state.win
-  if top and vim.api.nvim_win_is_valid(top) then
-    vim.wo[top].winbar = nil
-  end
+  vim.cmd("redrawstatus")
 end
 
 --- Set up keymaps on diff buffers (file nav, q).

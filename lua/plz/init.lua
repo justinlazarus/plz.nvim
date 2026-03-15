@@ -142,4 +142,17 @@ function M.setup(opts)
   })
 end
 
+--- Provider function for external statusline plugins (lualine, etc.).
+--- Returns the plz statusline string for the current buffer, or nil if not in a plz view.
+--- Usage: require("plz").statusline()
+function M.statusline()
+  local ft = vim.bo.filetype or ""
+  if ft == "plz-dashboard" then
+    return _G.PlzDashboardStatusLine and _G.PlzDashboardStatusLine() or nil
+  elseif ft == "plz-review" or ft == "plz-diff" then
+    return _G.PlzReviewStatusLine and _G.PlzReviewStatusLine() or nil
+  end
+  return nil
+end
+
 return M

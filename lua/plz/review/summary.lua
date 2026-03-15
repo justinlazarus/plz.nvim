@@ -102,16 +102,15 @@ function M.render_commits()
   local msg_w = math.max(10, win_w - 2 - left_fixed)
 
   -- Build sticky header via winbar (statusline format)
-  local count_str = #commits .. " cmts"
-  local count_col = fit(count_str, sha_w):gsub("%%", "%%%%")
-  local rest = fit(icons.person or "", author_w)
+  local hdr = fit("", sha_w)
+    .. fit(icons.person or "", author_w)
     .. fit(icons.lines or "", lines_w)
     .. fit(icons.updated or "", time_w)
   if has_checks then
-    rest = rest .. fit(icons.ci or "", ci_w)
+    hdr = hdr .. fit(icons.ci or "", ci_w)
   end
-  rest = rest .. (icons.commit or "")
-  local winbar = "%#PlzAccent#  " .. count_col .. "%#PlzHeader#" .. rest:gsub("%%", "%%%%")
+  hdr = hdr .. (icons.commit or "")
+  local winbar = "%#PlzHeader#  " .. hdr:gsub("%%", "%%%%")
     .. "%=%#PlzFaint#PR Detail  "
   if state.summary_win and vim.api.nvim_win_is_valid(state.summary_win) then
     vim.wo[state.summary_win].winbar = winbar

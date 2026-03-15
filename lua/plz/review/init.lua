@@ -371,13 +371,7 @@ function M._exit_commit_mode()
   state.head_sha = state.pr.headRefOid
   state.current_file_idx = nil
 
-  files.render()
-
-  -- Clear file list winbar
-  local top = state.top_win or state.win
-  if top and vim.api.nvim_win_is_valid(top) then
-    vim.wo[top].winbar = nil
-  end
+  files.render() -- also sets the column icon winbar
 
   -- Clear active commit highlight
   local c1 = state.collections and state.collections[1]
