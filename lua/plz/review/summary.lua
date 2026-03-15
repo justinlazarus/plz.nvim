@@ -102,7 +102,7 @@ function M.render_commits()
   local msg_w = math.max(10, win_w - 2 - left_fixed)
 
   -- Build sticky header via winbar (statusline format)
-  local hdr = fit("", sha_w)
+  local hdr = fit(icons.v_commit or "", sha_w)
     .. fit(icons.person or "", author_w)
     .. fit(icons.lines or "", lines_w)
     .. fit(icons.updated or "", time_w)

@@ -127,9 +127,8 @@ function M.render()
     table.insert(hl_regions, row_regions)
   end
 
-  -- Set winbar with column icons matching row layout
-  local file_win = state.top_win or state.win
-  if file_win and vim.api.nvim_win_is_valid(file_win) then
+  -- Set winbar with column icons matching row layout (only when C3 is active)
+  if state.active_collection == 3 and file_win and vim.api.nvim_win_is_valid(file_win) then
     local function hfit(s, w)
       local dw = vim.fn.strdisplaywidth(s)
       if dw >= w then return s end
