@@ -117,8 +117,10 @@ function M.render_commits()
   end
 
   if #commits == 0 then
-    table.insert(lines, "  Loading…")
-    table.insert(hl_regions, { { 2, 12, "PlzFaint" } })
+    -- commits is nil before fetch, {} after fetch completes (empty or error)
+    local msg = state.commits and "  No commits available" or "  Loading…"
+    table.insert(lines, msg)
+    table.insert(hl_regions, { { 2, #msg, "PlzFaint" } })
   end
 
   for _, c in ipairs(commits) do

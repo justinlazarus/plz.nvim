@@ -125,45 +125,64 @@ function M.open(pr)
   review_detail.fetch_thread_resolution(owner, repo, pr.number)
 end
 
---- Ensure the PR commits are available locally.
-function M._ensure_commits(callback)
-  local function verify_and_callback()
-    vim.system({ "git", "cat-file", "-t", state.head_sha }, { text = true }, function(check)
-      vim.schedule(function()
-        if check.code == 0 then
-          callback()
-        else
-          vim.notify("plz: could not fetch commits for this PR (branch may have been deleted)", vim.log.levels.WARN)
-        end
-      end)
-    end)
-  end
-
-  vim.system({ "git", "cat-file", "-t", state.head_sha }, { text = true }, function(obj)
+--- Ensure a single SHA is available locally, fetching if needed.
+--- @param sha string commit SHA to check
+--- @param fetch_ref string ref to fetch if SHA not local
+--- @param pr_number number PR number for fallback fetch
+--- @param callback function(ok: boolean)
+local function ensure_sha(sha, fetch_ref, pr_number, callback)
+  vim.system({ "git", "cat-file", "-t", sha }, { text = true }, function(obj)
     vim.schedule(function()
       if obj.code == 0 then
-        callback()
+        callback(true)
         return
       end
-      local ref = state.pr.headRefName or state.head_sha
-      vim.notify("plz: fetching " .. ref .. "…", vim.log.levels.INFO)
-      vim.system({ "git", "fetch", "origin", ref }, { text = true }, function(fo)
+      vim.notify("plz: fetching " .. fetch_ref .. "…", vim.log.levels.INFO)
+      vim.system({ "git", "fetch", "origin", fetch_ref }, { text = true }, function(fo)
         vim.schedule(function()
-          if fo.code ~= 0 then
-            vim.system(
-              { "git", "fetch", "origin", "pull/" .. state.pr.number .. "/head" },
-              { text = true },
-              function(po)
-                vim.schedule(function() verify_and_callback() end)
-              end
-            )
-          else
-            callback()
+          if fo.code == 0 then
+            callback(true)
+            return
           end
+          -- Fallback: fetch PR ref
+          vim.system({ "git", "fetch", "origin", "pull/" .. pr_number .. "/head" }, { text = true }, function(po)
+            vim.schedule(function()
+              -- Verify the SHA is now available
+              vim.system({ "git", "cat-file", "-t", sha }, { text = true }, function(check)
+                vim.schedule(function()
+                  callback(check.code == 0)
+                end)
+              end)
+            end)
+          end)
         end)
       end)
     end)
   end)
+end
+
+--- Ensure the PR commits (both head and base) are available locally.
+function M._ensure_commits(callback)
+  local head_ref = state.pr.headRefName or state.head_sha
+  local base_ref = state.pr.baseRefName or state.base_sha
+  local pr_number = state.pr.number
+
+  -- Check both SHAs in parallel
+  local pending = 2
+  local all_ok = true
+  local function on_done(ok)
+    if not ok then all_ok = false end
+    pending = pending - 1
+    if pending > 0 then return end
+    if all_ok then
+      callback()
+    else
+      vim.notify("plz: could not fetch commits for this PR (branch may have been deleted)", vim.log.levels.WARN)
+    end
+  end
+
+  ensure_sha(state.head_sha, head_ref, pr_number, on_done)
+  ensure_sha(state.base_sha, base_ref, pr_number, on_done)
 end
 
 --- Fetch PR commits via GraphQL (mirrors gh-dash's allCommits query).

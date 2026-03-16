@@ -84,6 +84,14 @@ function M.fetch_reviews(owner, repo, pr_number, callback)
   }, function(reviews, err)
     if err then
       state.reviews = {}
+      state.c2_items = {}
+      -- Re-render C2 if active to clear "Loading…"
+      if state.active_collection == 2 then
+        local c = state.collections and state.collections[2]
+        if c and c.top_buf and vim.api.nvim_buf_is_valid(c.top_buf) then
+          M.render_to(c.top_buf, state.top_win)
+        end
+      end
       if callback then callback() end
       return
     end
@@ -439,8 +447,10 @@ function M.render_reviews(buf, win)
   end
 
   if #items == 0 then
-    table.insert(lines, "  Loading…")
-    table.insert(hl_regions, { { 2, 12, "PlzFaint" } })
+    -- reviews is nil before fetch completes, table after
+    local msg = state.reviews and "  No reviews" or "  Loading…"
+    table.insert(lines, msg)
+    table.insert(hl_regions, { { 2, #msg, "PlzFaint" } })
   end
 
   -- Second pass: render rows
