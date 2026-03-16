@@ -5,6 +5,7 @@ local ado = require("plz.ado")
 local M = {}
 
 local ns = vim.api.nvim_create_namespace("plz_dashboard")
+local sel_ns = vim.api.nvim_create_namespace("plz_dashboard_sel")
 
 -- Header: tab bar + border + filter + border + column header + border = 6 lines
 local HEADER_LINES = 6
@@ -123,7 +124,7 @@ function _G.PlzDashboardStatusLine()
   end
   if #state.prs > 0 and state.list_win and vim.api.nvim_win_is_valid(state.list_win) then
     local row = vim.api.nvim_win_get_cursor(state.list_win)[1]
-    local idx = row - HEADER_LINES
+    local idx = math.ceil((row - HEADER_LINES) / 3)
     if idx >= 1 and idx <= #state.prs then
       local pr = state.prs[idx]
       local num = pr and pr.number or ""
@@ -162,8 +163,14 @@ function M.open()
   vim.wo[state.list_win].wrap = false
   vim.wo[state.list_win].foldcolumn = "0"
   vim.wo[state.list_win].statuscolumn = ""
-  vim.wo[state.list_win].cursorline = true
+  vim.wo[state.list_win].cursorline = false
   M._update_statusline()
+
+  -- Highlight both rows of the selected PR on cursor movement
+  state.autocmd_id = vim.api.nvim_create_autocmd("CursorMoved", {
+    buffer = state.list_buf,
+    callback = function() M._update_selection() end,
+  })
 
   M._setup_keymaps()
 
@@ -231,11 +238,17 @@ function M._render_rows()
   else
     for _, pr in ipairs(state.prs) do
       local body = (pr.body or ""):gsub("<!%-%-.-%-%->", "")
-    local ab_id = ((pr.title or ""):match("AB#(%d+)") or body:match("AB#(%d+)"))
+      local ab_id = ((pr.title or ""):match("AB#(%d+)") or body:match("AB#(%d+)"))
       local ado_item = ab_id and state.ado_cache[ab_id] or nil
       local row_text, row_regions = render.format_row(pr, cols, ado_item)
       table.insert(lines, row_text)
       table.insert(all_regions, row_regions)
+      local detail_text, detail_regions = render.format_detail_row(pr, ado_item)
+      table.insert(lines, detail_text)
+      table.insert(all_regions, detail_regions)
+      local branch_text, branch_regions = render.format_branch_row(pr)
+      table.insert(lines, branch_text)
+      table.insert(all_regions, branch_regions)
     end
     if state.has_more then
       local more = "  ── Load more (L) ──"
@@ -259,6 +272,27 @@ function M._render_rows()
   if #state.prs > 0 then
     pcall(vim.api.nvim_win_set_cursor, state.list_win, { HEADER_LINES + 1, 0 })
   end
+  M._update_selection()
+end
+
+--- Highlight all rows of the currently selected PR.
+function M._update_selection()
+  if not state.list_buf or not vim.api.nvim_buf_is_valid(state.list_buf) then return end
+  vim.api.nvim_buf_clear_namespace(state.list_buf, sel_ns, 0, -1)
+  if not state.list_win or not vim.api.nvim_win_is_valid(state.list_win) then return end
+  local row = vim.api.nvim_win_get_cursor(state.list_win)[1]
+  local pr_idx = math.ceil((row - HEADER_LINES) / 3)
+  if pr_idx < 1 or pr_idx > #state.prs then return end
+  -- All 3 rows for this PR (0-indexed)
+  local base = HEADER_LINES + (pr_idx - 1) * 3
+  for i = 0, 2 do
+    vim.api.nvim_buf_set_extmark(state.list_buf, sel_ns, base + i, 0, {
+      end_row = base + i + 1,
+      hl_group = "CursorLine",
+      hl_eol = true,
+      priority = 50,
+    })
+  end
 end
 
 --- Set up dashboard keybindings.
@@ -279,6 +313,25 @@ function M._setup_keymaps()
   vim.keymap.set("n", "<S-Tab>", function()
     M._fetch_tab(((state.tab_idx - 2) % #fetch.get_sections()) + 1)
   end, vim.tbl_extend("force", opts, { desc = "Previous tab" }))
+
+  vim.keymap.set("n", "j", function()
+    local row = vim.api.nvim_win_get_cursor(state.list_win)[1]
+    local max_row = HEADER_LINES + #state.prs * 3
+    local new_row = math.min(row + 3, max_row - 2)
+    -- Clamp to primary rows (first of each 3-line group)
+    local offset = (new_row - HEADER_LINES - 1) % 3
+    if offset ~= 0 then new_row = new_row - offset end
+    pcall(vim.api.nvim_win_set_cursor, state.list_win, { new_row, 0 })
+  end, vim.tbl_extend("force", opts, { desc = "Next PR" }))
+
+  vim.keymap.set("n", "k", function()
+    local row = vim.api.nvim_win_get_cursor(state.list_win)[1]
+    local new_row = math.max(row - 3, HEADER_LINES + 1)
+    -- Clamp to primary rows (first of each 3-line group)
+    local offset = (new_row - HEADER_LINES - 1) % 3
+    if offset ~= 0 then new_row = new_row - offset end
+    pcall(vim.api.nvim_win_set_cursor, state.list_win, { new_row, 0 })
+  end, vim.tbl_extend("force", opts, { desc = "Previous PR" }))
 
   vim.keymap.set("n", "o", function()
     local pr = M._get_selected_pr()
@@ -317,7 +370,7 @@ function M._setup_keymaps()
   local help_lines = {
     "plz dashboard",
     "",
-    "j/k       navigate",
+    "j/k       navigate PRs",
     "<CR>      open PR for review",
     "o         open in browser",
     "r         refresh",
@@ -411,9 +464,9 @@ function M._fetch_tab_with_filter(idx, limit)
   if limit then
     -- Load-more: replace the "Load more" footer with loading indicator, keep existing rows
     local total = vim.api.nvim_buf_line_count(state.list_buf)
-    if total > HEADER_LINES + #state.prs then
+    if total > HEADER_LINES + #state.prs * 3 then
       vim.bo[state.list_buf].modifiable = true
-      vim.api.nvim_buf_set_lines(state.list_buf, HEADER_LINES + #state.prs, -1, false, { "", "  Loading more..." })
+      vim.api.nvim_buf_set_lines(state.list_buf, HEADER_LINES + #state.prs * 3, -1, false, { "", "  Loading more..." })
       vim.bo[state.list_buf].modifiable = false
     end
   else
@@ -446,7 +499,8 @@ end
 --- Get the PR under the cursor.
 function M._get_selected_pr()
   if not state.list_win or not vim.api.nvim_win_is_valid(state.list_win) then return nil end
-  local pr_idx = vim.api.nvim_win_get_cursor(state.list_win)[1] - HEADER_LINES
+  local row = vim.api.nvim_win_get_cursor(state.list_win)[1]
+  local pr_idx = math.ceil((row - HEADER_LINES) / 3)
   return state.prs[pr_idx]
 end
 

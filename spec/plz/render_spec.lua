@@ -9,30 +9,18 @@ describe("dashboard.render", function()
     it("returns expected column keys", function()
       local cols = render.compute_columns(120)
       local expected_keys = {
-        "state", "title", "author", "comments", "review",
-        "ci", "lines", "updated", "created", "ado", "release", "base",
+        "number", "state", "comments", "review",
+        "ci", "files", "lines", "updated", "created", "ado",
       }
       for _, key in ipairs(expected_keys) do
         assert.is_not_nil(cols[key], "missing key: " .. key)
       end
     end)
 
-    it("title width grows with window width", function()
-      local narrow = render.compute_columns(80)
-      local wide = render.compute_columns(200)
-      assert.is_true(wide.title > narrow.title)
-    end)
-
-    it("title width has minimum of 20", function()
-      local cols = render.compute_columns(10) -- very narrow
-      assert.is_true(cols.title >= 20)
-    end)
-
     it("fixed columns stay constant across widths", function()
       local c1 = render.compute_columns(80)
       local c2 = render.compute_columns(200)
       assert.are.equal(c1.state, c2.state)
-      assert.are.equal(c1.author, c2.author)
       assert.are.equal(c1.ci, c2.ci)
       assert.are.equal(c1.lines, c2.lines)
     end)
@@ -125,6 +113,24 @@ describe("dashboard.render", function()
       local iso = os.date("%Y-%m-%dT%H:%M:%S", t)
       local result = render._relative_time(iso)
       assert.is_truthy(result:match("%d+h"))
+    end)
+  end)
+
+  describe("_format_time", function()
+    it("returns ? for nil input", function()
+      assert.are.equal("?", render._format_time(nil))
+    end)
+
+    it("returns ? for invalid format", function()
+      assert.are.equal("?", render._format_time("not-a-date"))
+    end)
+
+    it("formats as MM/DD HH:MM", function()
+      assert.are.equal("03/16 14:30", render._format_time("2026-03-16T14:30:00Z"))
+    end)
+
+    it("preserves leading zeros", function()
+      assert.are.equal("01/05 09:02", render._format_time("2026-01-05T09:02:15Z"))
     end)
   end)
 

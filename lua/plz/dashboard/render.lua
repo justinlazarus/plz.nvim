@@ -44,6 +44,8 @@ M.icons = {
   ado_none  = u(0xf073a),
   ado_h     = u(0xf0ae),
   release   = u(0xf427),
+  -- Files
+  files_h  = u(0xf0214), -- 󰈔 nf-md-file
   -- Git / Commits
   branch   = u(0xe725),
   commit   = u(0xf4b6),  -- CommitIcon (section heading)
@@ -60,35 +62,31 @@ M.icons = {
 --- @param win_width number
 --- @return table col_widths {state, number, title, author, review, ci, add, del, age}
 function M.compute_columns(win_width)
-  -- Fixed-width columns
+  -- Fixed-width columns (row 1)
+  local number_w   = 7
   local state_w    = 3
-  local author_w   = 24
+  local ado_w      = 4
   local comments_w = 5
   local review_w   = 4
   local ci_w       = 4
+  local files_w    = 6
   local lines_w    = 12
-  local updated_w  = 5
-  local created_w  = 5
-  local ado_w      = 4
-  local release_w  = 7
-  local base_w     = 20
+  local updated_w  = 13
+  local created_w  = 13
 
-  local fixed = state_w + author_w + comments_w + review_w + ci_w + lines_w + updated_w + created_w + ado_w + release_w + base_w
-  local title_w = math.max(20, win_width - fixed)
+  -- Detail row (row 2) — no fixed widths needed
 
   return {
+    number   = number_w,
     state    = state_w,
-    title    = title_w,
-    author   = author_w,
+    ado      = ado_w,
     comments = comments_w,
     review   = review_w,
     ci       = ci_w,
+    files    = files_w,
     lines    = lines_w,
     updated  = updated_w,
     created  = created_w,
-    ado      = ado_w,
-    release  = release_w,
-    base     = base_w,
   }
 end
 
@@ -185,9 +183,6 @@ function M.format_row(pr, cols, ado_item)
   local ci_icon, ci_hl = M._ci_icon(pr.statusCheckRollup)
   local add_str = string.format("+%s", M._format_number(pr.additions or 0))
   local del_str = string.format("-%s", M._format_number(pr.deletions or 0))
-  local title = M._truncate(M._clean_title(pr.title or "", pr.headRefName or ""), cols.title - 1)
-  local raw_name = (pr.author and (pr.author.name or pr.author.login)) or "?"
-  local author = M._truncate(raw_name:gsub("%s*%[.-%]%s*$", ""), cols.author - 2)
 
   -- ADO column (icon only)
   local ado_str = ""
@@ -214,19 +209,6 @@ function M.format_row(pr, cols, ado_item)
     ado_hl = "PlzFaint"         -- loading placeholder
   end
 
-  -- Release version (from ADO work item tags)
-  local release_str = ""
-  if ado_item and not ado_item.not_found and ado_item.tags and ado_item.tags ~= "" then
-    for tag in ado_item.tags:gmatch("[^;]+") do
-      local t = vim.trim(tag)
-      local ver = t:match("^[Rr]elease%s*(.+)") or t:match("^(%d+%.%d+[%d%.]*)")
-      if ver then
-        release_str = vim.trim(ver)
-        break
-      end
-    end
-  end
-
   -- PR icon: blue for open, gray for draft
   local pr_icon = M.icons.pr
   local pr_hl = "PlzOpen"
@@ -239,20 +221,72 @@ function M.format_row(pr, cols, ado_item)
   local comment_count = type(pr.comments) == "table" and #pr.comments or 0
   local comment_str = comment_count > 0 and tostring(comment_count) or ""
 
+  -- Files changed
+  local files_str = tostring(pr.changedFiles or 0)
+
   return build_row({
+    { " " .. (pr.number or ""), cols.number, "PlzOpen" },
     { " " .. pr_icon, cols.state, pr_hl },
     { " " .. ado_str, cols.ado, ado_hl },
-    { release_str, cols.release, release_str ~= "" and "PlzFaint" or nil },
     { comment_str, cols.comments, comment_count > 0 and "PlzFaint" or nil },
     { " " .. rev_icon, cols.review, rev_hl },
     { " " .. ci_icon, cols.ci, ci_hl },
+    { files_str, cols.files, "PlzFaint" },
     { M._lines_cell(add_str, del_str), cols.lines, M._lines_regions(add_str, del_str) },
-    { M._relative_time(pr.updatedAt), cols.updated, "PlzFaint" },
-    { M._relative_time(pr.createdAt), cols.created, "PlzFaint" },
-    { M._truncate(pr.baseRefName or "?", cols.base - 2), cols.base, "PlzFaint" },
-    { author, cols.author, "PlzFaint" },
-    { title, nil, "PlzFaint" },
+    { M._format_time(pr.createdAt), cols.created, "PlzFaint" },
+    { M._format_time(pr.updatedAt), nil, "PlzFaint" },
   })
+end
+
+--- Format the detail row (title + author + release) for a PR entry.
+--- @param pr table
+--- @param ado_item table|nil
+--- @return string line
+--- @return table[] regions
+function M.format_detail_row(pr, ado_item)
+  local raw_name = (pr.author and (pr.author.name or pr.author.login)) or "?"
+  local author = raw_name:gsub("%s*%[.-%]%s*$", "")
+  local title = M._clean_title(pr.title or "", pr.headRefName or "")
+
+  local release_str = ""
+  if ado_item and not ado_item.not_found and ado_item.tags and ado_item.tags ~= "" then
+    for tag in ado_item.tags:gmatch("[^;]+") do
+      local t = vim.trim(tag)
+      local ver = t:match("^[Rr]elease%s*(.+)") or t:match("^(%d+%.%d+[%d%.]*)")
+      if ver then
+        release_str = vim.trim(ver)
+        break
+      end
+    end
+  end
+
+  local regions = {}
+  local pos = 1
+  -- title (normal foreground)
+  local title_end = pos + #title
+  pos = title_end + 2
+  -- author (faint)
+  local author_end = pos + #author
+  table.insert(regions, { pos, author_end, "PlzFaint" })
+
+  local line = " " .. title .. "  " .. author
+  if release_str ~= "" then
+    local release_part = "  " .. M.icons.release .. " " .. release_str
+    local release_start = #line
+    line = line .. release_part
+    table.insert(regions, { release_start, #line, "PlzSuccess" })
+  end
+
+  return line, regions
+end
+
+--- Format the branch row (head → base) for a PR entry.
+--- @param pr table
+--- @return string line
+--- @return table[] regions
+function M.format_branch_row(pr)
+  local branch_str = " " .. M.icons.branch .. " " .. (pr.headRefName or "?") .. " → " .. (pr.baseRefName or "?")
+  return branch_str, { { 0, #branch_str, "PlzFaint" } }
 end
 
 --- Format column header line.
@@ -261,18 +295,16 @@ end
 --- @return table[] regions
 function M.header_line(cols)
   return build_row({
+    { " #", cols.number, "PlzHeader" },
     { "", cols.state, "PlzHeader" },
     { " " .. M.icons.ado_h, cols.ado, "PlzHeader" },
-    { M.icons.release, cols.release, "PlzHeader" },
     { M.icons.comments, cols.comments, "PlzHeader" },
     { " " .. M.icons.review_h, cols.review, "PlzHeader" },
     { " " .. M.icons.ci, cols.ci, "PlzHeader" },
+    { M.icons.files_h, cols.files, "PlzHeader" },
     { M.icons.lines, cols.lines, "PlzHeader" },
-    { M.icons.updated, cols.updated, "PlzHeader" },
-    { M.icons.created, cols.created, "PlzHeader" },
-    { M.icons.branch, cols.base, "PlzHeader" },
-    { "Author", cols.author, "PlzHeader" },
-    { "Title", nil, "PlzHeader" },
+    { "Created", cols.created, "PlzHeader" },
+    { "Updated", nil, "PlzHeader" },
   })
 end
 
@@ -400,6 +432,13 @@ function M._relative_time(iso_str)
   elseif diff < 2592000 then return math.floor(diff / 604800) .. "w"
   else return math.floor(diff / 2592000) .. "mo"
   end
+end
+
+function M._format_time(iso_str)
+  if not iso_str then return "?" end
+  local y, mo, d, h, mi = iso_str:match("(%d+)-(%d+)-(%d+)T(%d+):(%d+)")
+  if not y then return "?" end
+  return string.format("%s/%s %s:%s", mo, d, h, mi)
 end
 
 return M
