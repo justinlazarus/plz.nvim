@@ -13,6 +13,8 @@ local HEADER_LINES = 6
 local state = {
   tab_idx = 1,
   prs = {},
+  header_buf = nil, -- fixed header buffer
+  header_win = nil, -- fixed header window
   list_buf = nil,
   list_win = nil,
   autocmd_id = nil,
@@ -53,10 +55,10 @@ local function set_buf_lines_from(buf, start_row, lines)
   vim.bo[buf].modifiable = false
 end
 
---- Render the header into the buffer (tab bar + borders + column headers).
+--- Render the header into the header buffer.
 --- Only called once on open and when tab changes (to update active tab highlight).
 function M._write_header()
-  if not state.list_buf or not vim.api.nvim_buf_is_valid(state.list_buf) then return end
+  if not state.header_buf or not vim.api.nvim_buf_is_valid(state.header_buf) then return end
 
   local cols = get_cols()
   local lines = {}
@@ -88,19 +90,14 @@ function M._write_header()
   lines[6] = border
   all_regions[6] = { { 0, #border, "PlzBorder" } }
 
-  vim.bo[state.list_buf].modifiable = true
-  local total = vim.api.nvim_buf_line_count(state.list_buf)
-  if total < HEADER_LINES then
-    vim.api.nvim_buf_set_lines(state.list_buf, 0, -1, false, lines)
-  else
-    vim.api.nvim_buf_set_lines(state.list_buf, 0, HEADER_LINES, false, lines)
-  end
-  vim.bo[state.list_buf].modifiable = false
+  vim.bo[state.header_buf].modifiable = true
+  vim.api.nvim_buf_set_lines(state.header_buf, 0, -1, false, lines)
+  vim.bo[state.header_buf].modifiable = false
 
   -- Apply header highlights
-  render.clear(state.list_buf)
+  render.clear(state.header_buf)
   for i, regions in ipairs(all_regions) do
-    render.apply_regions(state.list_buf, i - 1, regions)
+    render.apply_regions(state.header_buf, i - 1, regions)
   end
 end
 
@@ -124,7 +121,7 @@ function _G.PlzDashboardStatusLine()
   end
   if #state.prs > 0 and state.list_win and vim.api.nvim_win_is_valid(state.list_win) then
     local row = vim.api.nvim_win_get_cursor(state.list_win)[1]
-    local idx = math.ceil((row - HEADER_LINES) / 3)
+    local idx = math.ceil(row / 3)
     if idx >= 1 and idx <= #state.prs then
       local pr = state.prs[idx]
       local num = pr and pr.number or ""
@@ -144,29 +141,50 @@ function M._update_statusline()
   vim.wo[state.list_win].statusline = "%{%v:lua.PlzDashboardStatusLine()%}"
 end
 
+--- Configure window options for dashboard windows.
+local function setup_win_opts(win)
+  vim.wo[win].number = false
+  vim.wo[win].relativenumber = false
+  vim.wo[win].signcolumn = "no"
+  vim.wo[win].wrap = false
+  vim.wo[win].foldcolumn = "0"
+  vim.wo[win].statuscolumn = ""
+  vim.wo[win].cursorline = false
+end
+
 --- Open the plz dashboard.
 function M.open()
   state.prev_buf = vim.api.nvim_get_current_buf()
 
+  -- Header buffer + window (fixed height, top of screen)
+  state.header_buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[state.header_buf].buftype = "nofile"
+  vim.bo[state.header_buf].bufhidden = "wipe"
+
+  -- List buffer (scrollable PR rows)
   state.list_buf = vim.api.nvim_create_buf(false, true)
   vim.bo[state.list_buf].buftype = "nofile"
   vim.bo[state.list_buf].bufhidden = "wipe"
   vim.bo[state.list_buf].filetype = "plz-dashboard"
 
-  -- Take over current window
+  -- Take over current window for the list
   state.list_win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(state.list_win, state.list_buf)
 
-  vim.wo[state.list_win].number = false
-  vim.wo[state.list_win].relativenumber = false
-  vim.wo[state.list_win].signcolumn = "no"
-  vim.wo[state.list_win].wrap = false
-  vim.wo[state.list_win].foldcolumn = "0"
-  vim.wo[state.list_win].statuscolumn = ""
-  vim.wo[state.list_win].cursorline = false
+  -- Split a fixed header window above the list
+  vim.cmd("aboveleft " .. HEADER_LINES .. "split")
+  state.header_win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(state.header_win, state.header_buf)
+  vim.wo[state.header_win].winfixheight = true
+  vim.wo[state.header_win].statusline = " "
+  setup_win_opts(state.header_win)
+
+  -- Focus the list window
+  vim.api.nvim_set_current_win(state.list_win)
+  setup_win_opts(state.list_win)
   M._update_statusline()
 
-  -- Highlight both rows of the selected PR on cursor movement
+  -- Highlight all rows of the selected PR on cursor movement
   state.autocmd_id = vim.api.nvim_create_autocmd("CursorMoved", {
     buffer = state.list_buf,
     callback = function() M._update_selection() end,
@@ -259,18 +277,19 @@ function M._render_rows()
     end
   end
 
-  -- Replace only lines after header
-  set_buf_lines_from(state.list_buf, HEADER_LINES, lines)
+  -- Replace all lines in the list buffer
+  set_buf_lines_from(state.list_buf, 0, lines)
 
-  -- Re-apply all highlights (header + rows)
+  -- Re-apply highlights
+  render.clear(state.list_buf)
   M._write_header()
   for i, regions in ipairs(all_regions) do
-    render.apply_regions(state.list_buf, HEADER_LINES + i - 1, regions)
+    render.apply_regions(state.list_buf, i - 1, regions)
   end
 
   -- Position cursor on first PR
   if #state.prs > 0 then
-    pcall(vim.api.nvim_win_set_cursor, state.list_win, { HEADER_LINES + 1, 0 })
+    pcall(vim.api.nvim_win_set_cursor, state.list_win, { 1, 0 })
   end
   M._update_selection()
 end
@@ -281,10 +300,10 @@ function M._update_selection()
   vim.api.nvim_buf_clear_namespace(state.list_buf, sel_ns, 0, -1)
   if not state.list_win or not vim.api.nvim_win_is_valid(state.list_win) then return end
   local row = vim.api.nvim_win_get_cursor(state.list_win)[1]
-  local pr_idx = math.ceil((row - HEADER_LINES) / 3)
+  local pr_idx = math.ceil(row / 3)
   if pr_idx < 1 or pr_idx > #state.prs then return end
   -- All 3 rows for this PR (0-indexed)
-  local base = HEADER_LINES + (pr_idx - 1) * 3
+  local base = (pr_idx - 1) * 3
   for i = 0, 2 do
     vim.api.nvim_buf_set_extmark(state.list_buf, sel_ns, base + i, 0, {
       end_row = base + i + 1,
@@ -316,19 +335,19 @@ function M._setup_keymaps()
 
   vim.keymap.set("n", "j", function()
     local row = vim.api.nvim_win_get_cursor(state.list_win)[1]
-    local max_row = HEADER_LINES + #state.prs * 3
+    local max_row = #state.prs * 3
     local new_row = math.min(row + 3, max_row - 2)
     -- Clamp to primary rows (first of each 3-line group)
-    local offset = (new_row - HEADER_LINES - 1) % 3
+    local offset = (new_row - 1) % 3
     if offset ~= 0 then new_row = new_row - offset end
     pcall(vim.api.nvim_win_set_cursor, state.list_win, { new_row, 0 })
   end, vim.tbl_extend("force", opts, { desc = "Next PR" }))
 
   vim.keymap.set("n", "k", function()
     local row = vim.api.nvim_win_get_cursor(state.list_win)[1]
-    local new_row = math.max(row - 3, HEADER_LINES + 1)
+    local new_row = math.max(row - 3, 1)
     -- Clamp to primary rows (first of each 3-line group)
-    local offset = (new_row - HEADER_LINES - 1) % 3
+    local offset = (new_row - 1) % 3
     if offset ~= 0 then new_row = new_row - offset end
     pcall(vim.api.nvim_win_set_cursor, state.list_win, { new_row, 0 })
   end, vim.tbl_extend("force", opts, { desc = "Previous PR" }))
@@ -398,18 +417,18 @@ function M._edit_filter()
   state.editing_filter = true
 
   local current = M._get_filter()
-  local win_w = state.list_win and vim.api.nvim_win_is_valid(state.list_win)
-    and vim.api.nvim_win_get_width(state.list_win) or 90
+  local win_w = state.header_win and vim.api.nvim_win_is_valid(state.header_win)
+    and vim.api.nvim_win_get_width(state.header_win) or 90
 
   -- Create a 1-line scratch buffer for editing
   state.filter_buf = vim.api.nvim_create_buf(false, true)
   vim.bo[state.filter_buf].buftype = "nofile"
   vim.bo[state.filter_buf].bufhidden = "wipe"
 
-  -- Open as a floating window over the filter line (row 2, 0-indexed)
+  -- Open as a floating window over the filter line (row 2 in header, 0-indexed)
   local filter_win = vim.api.nvim_open_win(state.filter_buf, true, {
     relative = "win",
-    win = state.list_win,
+    win = state.header_win,
     row = 2,
     col = 0,
     width = win_w,
@@ -464,15 +483,15 @@ function M._fetch_tab_with_filter(idx, limit)
   if limit then
     -- Load-more: replace the "Load more" footer with loading indicator, keep existing rows
     local total = vim.api.nvim_buf_line_count(state.list_buf)
-    if total > HEADER_LINES + #state.prs * 3 then
+    if total > #state.prs * 3 then
       vim.bo[state.list_buf].modifiable = true
-      vim.api.nvim_buf_set_lines(state.list_buf, HEADER_LINES + #state.prs * 3, -1, false, { "", "  Loading more..." })
+      vim.api.nvim_buf_set_lines(state.list_buf, #state.prs * 3, -1, false, { "", "  Loading more..." })
       vim.bo[state.list_buf].modifiable = false
     end
   else
     state.prs = {}
     M._write_header()
-    set_buf_lines_from(state.list_buf, HEADER_LINES, { "", "  Loading..." })
+    set_buf_lines_from(state.list_buf, 0, { "", "  Loading..." })
   end
 
   state.fetch_gen = state.fetch_gen + 1
@@ -484,7 +503,7 @@ function M._fetch_tab_with_filter(idx, limit)
     if gen ~= state.fetch_gen then return end -- stale callback
     if err then
       local err_msg = err:gsub("\n", " ")
-      set_buf_lines_from(state.list_buf, HEADER_LINES, { "", "  Error: " .. err_msg })
+      set_buf_lines_from(state.list_buf, 0, { "", "  Error: " .. err_msg })
       return
     end
     state.prs = prs or {}
@@ -500,7 +519,7 @@ end
 function M._get_selected_pr()
   if not state.list_win or not vim.api.nvim_win_is_valid(state.list_win) then return nil end
   local row = vim.api.nvim_win_get_cursor(state.list_win)[1]
-  local pr_idx = math.ceil((row - HEADER_LINES) / 3)
+  local pr_idx = math.ceil(row / 3)
   return state.prs[pr_idx]
 end
 
@@ -509,6 +528,14 @@ function M.close()
   if state.autocmd_id then
     pcall(vim.api.nvim_del_autocmd, state.autocmd_id)
     state.autocmd_id = nil
+  end
+
+  -- Close header window first
+  if state.header_win and vim.api.nvim_win_is_valid(state.header_win) then
+    pcall(vim.api.nvim_win_close, state.header_win, true)
+  end
+  if state.header_buf and vim.api.nvim_buf_is_valid(state.header_buf) then
+    pcall(vim.api.nvim_buf_delete, state.header_buf, { force = true })
   end
 
   if state.prev_buf and vim.api.nvim_buf_is_valid(state.prev_buf) then
@@ -521,6 +548,8 @@ function M.close()
     pcall(vim.api.nvim_buf_delete, state.list_buf, { force = true })
   end
 
+  state.header_buf = nil
+  state.header_win = nil
   state.list_buf = nil
   state.list_win = nil
   state.prev_buf = nil

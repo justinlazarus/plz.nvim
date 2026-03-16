@@ -127,6 +127,18 @@ end
 
 --- Ensure the PR commits are available locally.
 function M._ensure_commits(callback)
+  local function verify_and_callback()
+    vim.system({ "git", "cat-file", "-t", state.head_sha }, { text = true }, function(check)
+      vim.schedule(function()
+        if check.code == 0 then
+          callback()
+        else
+          vim.notify("plz: could not fetch commits for this PR (branch may have been deleted)", vim.log.levels.WARN)
+        end
+      end)
+    end)
+  end
+
   vim.system({ "git", "cat-file", "-t", state.head_sha }, { text = true }, function(obj)
     vim.schedule(function()
       if obj.code == 0 then
@@ -141,7 +153,9 @@ function M._ensure_commits(callback)
             vim.system(
               { "git", "fetch", "origin", "pull/" .. state.pr.number .. "/head" },
               { text = true },
-              function() vim.schedule(callback) end
+              function(po)
+                vim.schedule(function() verify_and_callback() end)
+              end
             )
           else
             callback()
