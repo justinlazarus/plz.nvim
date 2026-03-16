@@ -4,6 +4,7 @@ local icons = require("plz.dashboard.render").icons
 local M = {}
 
 local ns = vim.api.nvim_create_namespace("plz_review_detail")
+local ns_active = vim.api.nvim_create_namespace("plz_review_detail_active")
 
 --- Reference to the shared review state table, set via M.setup().
 local state
@@ -444,6 +445,7 @@ function M.render_reviews(buf, win)
   end
 
   -- Second pass: render rows
+  local selected = state.selected_review_idx
   for _, rd in ipairs(row_data) do
     local item = rd.item
 
@@ -523,11 +525,11 @@ function M.render_reviews(buf, win)
 
     local regions = {
       { p, p1, status_hl },
-      { p2, p3, "PlzFaint" },
-      { p3, p4, "PlzFaint" },
-      { p4, p5, "PlzFaint" },
-      { p5, #line, "PlzFaint" },
     }
+    table.insert(regions, { p2, p3, "PlzFaint" })
+    table.insert(regions, { p3, p4, "PlzFaint" })
+    table.insert(regions, { p4, p5, "PlzFaint" })
+    table.insert(regions, { p5, #line, "PlzFaint" })
     for _, pr in ipairs(rd.people_regions) do
       table.insert(regions, { p_people_start + pr[1], p_people_start + pr[2], pr[3] })
     end
@@ -539,6 +541,7 @@ function M.render_reviews(buf, win)
   vim.bo[buf].modifiable = false
 
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+  vim.api.nvim_buf_clear_namespace(buf, ns_active, 0, -1)
   for i, regions in ipairs(hl_regions) do
     for _, r in ipairs(regions) do
       if r[1] < r[2] and r[1] < #lines[i] then
@@ -549,17 +552,55 @@ function M.render_reviews(buf, win)
       end
     end
   end
+
+  -- Highlight selected row with CursorLine background
+  if selected then
+    local row = selected - 1  -- 0-indexed
+    if row >= 0 and row < #lines then
+      pcall(vim.api.nvim_buf_set_extmark, buf, ns_active, row, 0, {
+        line_hl_group = "CursorLine",
+      })
+    end
+  end
+end
+
+--- Compute the offset in seconds between local time and UTC.
+--- os.time() interprets its table as local time, so we compare
+--- os.date("!*t") (UTC) and os.date("*t") (local) at the same instant.
+local function utc_offset()
+  local now = os.time()
+  local utc = os.date("!*t", now)
+  local loc = os.date("*t", now)
+  utc.isdst = loc.isdst
+  return os.difftime(now, os.time(utc))
+end
+
+--- Format an ISO (UTC) timestamp as local "YYYY-MM-DD  HH:MM".
+local function format_datetime(iso_str)
+  if not iso_str then return "", "" end
+  local y, mo, d, h, mi, s = iso_str:match("(%d+)-(%d+)-(%d+)T(%d+):(%d+):(%d+)")
+  if not y then return "", "" end
+  -- os.time interprets the table as local time, so we add the UTC offset
+  -- to get the true UTC epoch, then os.date("*t") converts to local.
+  local as_local = os.time({
+    year = tonumber(y), month = tonumber(mo), day = tonumber(d),
+    hour = tonumber(h), min = tonumber(mi), sec = tonumber(s),
+  })
+  local local_ts = as_local + utc_offset()
+  local local_t = os.date("*t", local_ts)
+  return string.format("%04d-%02d-%02d", local_t.year, local_t.month, local_t.day),
+         string.format("%02d:%02d", local_t.hour, local_t.min)
 end
 
 --- Render detail for a selected C2 item in the bottom buffer.
---- Shows review body (if any) followed by all threads in the review.
+--- Shows threads as bordered boxes with file:line header, root comment,
+--- and bullet-prefixed replies.
 --- @param buf number Buffer handle
 --- @param win number|nil Window handle
 --- @param item_idx number 1-indexed index into state.c2_items
 function M.render_threads(buf, win, item_idx)
   if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
 
-  local render = require("plz.dashboard.render")
   local items = state.c2_items or {}
   local item = items[item_idx]
   if not item then return end
@@ -573,118 +614,130 @@ function M.render_threads(buf, win, item_idx)
     win_w = vim.api.nvim_win_get_width(win) - 2
   end
   local box_w = math.max(30, win_w)
+  local border_l = "│ "
+  local border_r = " │"
+  local border_l_dw = vim.fn.strdisplaywidth(border_l)
+  local border_r_dw = vim.fn.strdisplaywidth(border_r)
+  local inner_w = box_w - border_l_dw - border_r_dw
 
-  --- Helper: add a bordered author header box
-  local function add_author_box(login, user, time_ago)
-    local name = display_name(user)
-    local hl = author_hl(login)
-    local inner = " " .. name .. "  " .. time_ago .. " "
-    local inner_w = vim.fn.strdisplaywidth(inner)
-    local pad_needed = math.max(0, box_w - 2 - inner_w)
-    inner = inner .. string.rep(" ", pad_needed)
+  --- Helper: wrap text to fit within max_w display columns, breaking at spaces.
+  local function wrap_text(text, max_w)
+    if vim.fn.strdisplaywidth(text) <= max_w then return { text } end
+    local result = {}
+    local remaining = text
+    while remaining ~= "" do
+      if vim.fn.strdisplaywidth(remaining) <= max_w then
+        table.insert(result, remaining)
+        break
+      end
+      -- Find the last space that fits within max_w
+      local cut = #remaining
+      for i = 1, #remaining do
+        if vim.fn.strdisplaywidth(remaining:sub(1, i)) > max_w then
+          cut = i - 1
+          break
+        end
+      end
+      -- Find last space at or before cut
+      local space_pos = remaining:sub(1, cut):match(".*()%s")
+      if space_pos and space_pos > 1 then
+        table.insert(result, remaining:sub(1, space_pos - 1))
+        remaining = remaining:sub(space_pos + 1)
+      else
+        -- No space found, hard-break at cut
+        table.insert(result, remaining:sub(1, cut))
+        remaining = remaining:sub(cut + 1)
+      end
+    end
+    return result
+  end
 
+  --- Helper: add a line inside the box (bordered left and right).
+  --- If text exceeds inner_w, wraps at word boundaries. Highlight regions
+  --- only apply to the first physical line; continuation lines get no extra hl.
+  local function add_box_line(text, regions)
+    local wrapped = wrap_text(text, inner_w)
+    for wi, seg in ipairs(wrapped) do
+      local display_w = vim.fn.strdisplaywidth(seg)
+      local pad = math.max(0, inner_w - display_w)
+      local line = border_l .. seg .. string.rep(" ", pad) .. border_r
+      table.insert(lines, line)
+      local bl = #border_l
+      local shifted = {
+        { 0, bl, "PlzBorder" },
+      }
+      if wi == 1 then
+        for _, r in ipairs(regions or {}) do
+          table.insert(shifted, { bl + r[1], bl + r[2], r[3] })
+        end
+      end
+      table.insert(shifted, { #line - #border_r, #line, "PlzBorder" })
+      table.insert(hl_regions, shifted)
+    end
+  end
+
+  --- Helper: render a single thread as a bordered box
+  local function render_thread(thr)
+    -- Top border
     local top = "╭" .. string.rep("─", box_w - 2) .. "╮"
     table.insert(lines, top)
     table.insert(hl_regions, { { 0, #top, "PlzBorder" } })
 
-    local mid = "│" .. inner .. "│"
-    table.insert(lines, mid)
-    local name_start = #"│ "
-    local name_end = name_start + #name
-    local time_start = name_end + 2
-    local time_end = time_start + #time_ago
-    table.insert(hl_regions, {
-      { 0, name_start, "PlzBorder" },
-      { name_start, name_end, hl },
-      { time_start, time_end, "PlzFaint" },
-      { time_end, #mid, "PlzBorder" },
-    })
+    -- File:line header
+    local path_ref = thr.path or ""
+    if path_ref ~= "" and thr.line ~= "" then
+      path_ref = path_ref .. ":" .. tostring(thr.line)
+    end
+    if path_ref ~= "" then
+      add_box_line(path_ref, { { 0, #path_ref, "PlzFaint" } })
+    else
+      add_box_line("", {})
+    end
 
-    local bot = "╰" .. string.rep("─", box_w - 2) .. "╯"
-    table.insert(lines, bot)
-    table.insert(hl_regions, { { 0, #bot, "PlzBorder" } })
-  end
+    -- Horizontal rule under location
+    local rule = "├" .. string.rep("─", box_w - 2) .. "┤"
+    table.insert(lines, rule)
+    table.insert(hl_regions, { { 0, #rule, "PlzBorder" } })
 
-  --- Helper: render a single thread's comments
-  local function render_thread(thr, show_path)
+    -- Render each comment
     for ci, comment in ipairs(thr.comments) do
       local login = (comment.user and comment.user.login) or "?"
-      local time_ago = render._relative_time(comment.created_at or "")
+      local name = display_name(comment.user)
+      local hl = author_hl(login)
+      local date_str, time_str = format_datetime(comment.created_at)
+      local is_reply = ci > 1
 
-      if ci > 1 then
-        table.insert(lines, "")
-        table.insert(hl_regions, {})
-      end
+      -- Author line
+      local author_line = name .. "  " .. date_str .. "  " .. time_str
+      local name_end = #name
+      local meta_start = name_end + 2
+      add_box_line(author_line, {
+        { 0, name_end, hl },
+        { meta_start, #author_line, "PlzFaint" },
+      })
 
-      add_author_box(login, comment.user, time_ago)
-
-      -- File path reference (only on first comment of thread)
-      if ci == 1 and show_path and thr.path ~= "" then
-        table.insert(lines, "")
-        table.insert(hl_regions, {})
-        local path_ref = thr.path
-        if thr.line ~= "" then
-          path_ref = path_ref .. "#l" .. tostring(thr.line)
-        end
-        table.insert(lines, path_ref)
-        table.insert(hl_regions, { { 0, #path_ref, "PlzFaint" } })
-      end
-
-      table.insert(lines, "")
-      table.insert(hl_regions, {})
-
+      -- Comment body
       local cbody = (comment.body or ""):gsub("\r", "")
       cbody = cbody:gsub("<!%-%-.-%-%->", "")
       cbody = vim.trim(cbody)
       if cbody ~= "" then
         for _, raw in ipairs(vim.split(cbody, "\n", { plain = true })) do
-          table.insert(lines, raw)
-          table.insert(hl_regions, {})
+          add_box_line(raw, {})
         end
       end
-
-      table.insert(lines, "")
-      table.insert(hl_regions, {})
     end
+
+    -- Bottom border
+    local bot = "╰" .. string.rep("─", box_w - 2) .. "╯"
+    table.insert(lines, bot)
+    table.insert(hl_regions, { { 0, #bot, "PlzBorder" } })
   end
 
-  -- Review body (if present)
+  -- Review body (if present, render just the body text)
   local r = item.review
   if r then
-    local login = (r.user and r.user.login) or "?"
-    local review_state = r.state or ""
-    local time_ago = render._relative_time(r.submitted_at or "")
-
-    local icon, icon_hl
-    if review_state == "APPROVED" then
-      icon, icon_hl = icons.approved, "PlzSuccess"
-    elseif review_state == "CHANGES_REQUESTED" then
-      icon, icon_hl = icons.changes, "PlzError"
-    elseif review_state == "COMMENTED" then
-      icon, icon_hl = icons.comment, "PlzAccent"
-    elseif review_state == "DISMISSED" then
-      icon, icon_hl = icons.dismissed or "○", "PlzFaint"
-    else
-      icon, icon_hl = icons.waiting, "PlzWarning"
-    end
-
-    local name = display_name(r.user)
-    local state_label = review_state:lower():gsub("_", " ")
-    local status_line = icon .. " " .. name .. " " .. state_label .. " " .. time_ago
-    table.insert(lines, status_line)
-    local icon_end = #icon
-    local name_start = icon_end + 1
-    local name_end = name_start + #name
-    table.insert(hl_regions, {
-      { 0, icon_end, icon_hl },
-      { name_start, name_end, author_hl(login) },
-      { name_end, #status_line, "PlzFaint" },
-    })
-
     local body = r.body or ""
     if body ~= "" then
-      table.insert(lines, "")
-      table.insert(hl_regions, {})
       body = body:gsub("\r", ""):gsub("<!%-%-.-%-%->", "")
       body = body:gsub("\n\n\n+", "\n\n")
       body = vim.trim(body)
@@ -692,48 +745,23 @@ function M.render_threads(buf, win, item_idx)
         table.insert(lines, raw)
         table.insert(hl_regions, {})
       end
+      table.insert(lines, "")
+      table.insert(hl_regions, {})
     end
   end
 
-  -- Render each thread in this review
+  -- Render each thread as a bordered box
   local review_threads = item.threads or {}
   for ti, thr in ipairs(review_threads) do
-    -- Separator between threads
-    if ti > 1 or r then
-      table.insert(lines, "")
-      table.insert(hl_regions, {})
-      local sep = string.rep("─", box_w)
-      table.insert(lines, sep)
-      table.insert(hl_regions, { { 0, #sep, "PlzBorder" } })
+    if ti > 1 then
       table.insert(lines, "")
       table.insert(hl_regions, {})
     end
-
-    render_thread(thr, true)
+    render_thread(thr)
   end
 
-  -- Winbar
   if win and vim.api.nvim_win_is_valid(win) then
-    local wb
-    if r then
-      local name = display_name(r.user)
-      local login = (r.user and r.user.login) or "?"
-      local state_label = (r.state or ""):lower():gsub("_", " ")
-      wb = "%#" .. author_hl(login) .. "#  " .. name:gsub("%%", "%%%%")
-        .. "%#PlzFaint#  " .. state_label:gsub("%%", "%%%%")
-      if item.thread_count and item.thread_count > 0 then
-        wb = wb .. "  " .. item.thread_count .. " threads"
-        .. "  " .. item.msg_count .. " msgs"
-      end
-    else
-      wb = "%#PlzAccent#  thread"
-    end
-    if item.resolved == true then
-      wb = wb .. " %#PlzSuccess#● resolved"
-    elseif item.resolved == false then
-      wb = wb .. " %#PlzYellow#○ unresolved"
-    end
-    vim.wo[win].winbar = wb
+    vim.wo[win].winbar = nil
     vim.wo[win].cursorline = false
     vim.wo[win].wrap = true
   end

@@ -471,6 +471,7 @@ function M._setup_keymaps()
       local row = vim.api.nvim_win_get_cursor(win)[1]
       if row >= 1 and row <= #items then
         state.selected_review_idx = row
+        review_detail.render_reviews(c2.top_buf, state.top_win)
         review_detail.render_threads(c2.bottom_buf, state.bottom_win, row)
       end
     end, vim.tbl_extend("force", r_opts, { desc = "Select thread" }))
