@@ -85,6 +85,80 @@ describe("diff.align", function()
       assert.are.equal(#lhs, #rhs)
     end)
 
+    it("handles swapped lines (crossed anchors)", function()
+      local old = { "a", "B", "C", "d" }
+      local new = { "a", "C", "B", "d" }
+      -- Difftastic reports crossed anchors: lhs 1↔rhs 2, lhs 2↔rhs 1
+      local diff = {
+        hunks = { {
+          entries = {
+            { type = "change", lhs_line = 1, rhs_line = 2 },
+            { type = "change", lhs_line = 2, rhs_line = 1 },
+          },
+        } },
+      }
+
+      local lhs, rhs = align.build(old, new, diff)
+      assert.are.equal(#lhs, #rhs)
+      -- Both sides must have monotonically increasing orig values
+      -- (ignoring nil fillers)
+      local prev_lhs = -1
+      local prev_rhs = -1
+      for i = 1, #lhs do
+        if lhs[i].orig then
+          assert.is_true(lhs[i].orig > prev_lhs,
+            "LHS orig not monotonic at row " .. i)
+          prev_lhs = lhs[i].orig
+        end
+        if rhs[i].orig then
+          assert.is_true(rhs[i].orig > prev_rhs,
+            "RHS orig not monotonic at row " .. i)
+          prev_rhs = rhs[i].orig
+        end
+      end
+      -- All 4 original lines from each side must appear
+      local lhs_origs = {}
+      local rhs_origs = {}
+      for _, e in ipairs(lhs) do
+        if e.orig then lhs_origs[e.orig] = true end
+      end
+      for _, e in ipairs(rhs) do
+        if e.orig then rhs_origs[e.orig] = true end
+      end
+      for i = 0, 3 do
+        assert.is_true(lhs_origs[i] ~= nil, "missing LHS orig " .. i)
+        assert.is_true(rhs_origs[i] ~= nil, "missing RHS orig " .. i)
+      end
+    end)
+
+    it("fills gaps in add_set for unreported blank lines", function()
+      -- Simulates difftastic skipping a blank line (rhs line 2) within an insertion
+      local old = { "a", "d" }
+      local new = { "a", "b", "", "c", "d" }
+      local diff = {
+        hunks = { {
+          entries = {
+            { type = "add", rhs_line = 1 },  -- "b"
+            -- rhs_line 2 ("") is NOT reported by difftastic
+            { type = "add", rhs_line = 3 },  -- "c"
+          },
+        } },
+      }
+
+      local lhs, rhs = align.build(old, new, diff)
+      assert.are.equal(#lhs, #rhs)
+      -- "d" must align: find it on both sides at the same row
+      local lhs_d_row, rhs_d_row
+      for i = 1, #lhs do
+        if lhs[i].text == "d" then lhs_d_row = i end
+        if rhs[i].text == "d" then rhs_d_row = i end
+      end
+      assert.is_not_nil(lhs_d_row, "LHS must contain 'd'")
+      assert.is_not_nil(rhs_d_row, "RHS must contain 'd'")
+      assert.are.equal(lhs_d_row, rhs_d_row,
+        "LHS 'd' and RHS 'd' must be on the same row")
+    end)
+
     it("handles empty diff result", function()
       local old = { "a", "b" }
       local new = { "a", "b" }
