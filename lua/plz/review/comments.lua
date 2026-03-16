@@ -28,10 +28,7 @@ function M.fetch_review_comments(owner, repo, pr_number)
   gh.run({
     "api", string.format("repos/%s/%s/pulls/%d/comments?per_page=100", owner, repo, pr_number),
   }, function(comments, err)
-    if err then
-      vim.notify("plz: comments: " .. err, vim.log.levels.WARN)
-      return
-    end
+    if err then return end
     state.review_comments = comments or {}
     M.index_comments()
     -- Re-index comments by review and rebuild thread list (for C2)

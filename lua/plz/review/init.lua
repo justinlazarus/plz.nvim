@@ -81,6 +81,8 @@ function M.open(pr)
     return
   end
 
+  gh.begin_session()
+
   vim.notify("plz: loading PR #" .. pr.number .. "…", vim.log.levels.INFO)
 
   -- Fetch files and commits in parallel
@@ -101,10 +103,7 @@ function M.open(pr)
   gh.run({
     "api", string.format("repos/%s/%s/pulls/%d/files?per_page=100", owner, repo, pr.number),
   }, function(file_list, err)
-    if err then
-      vim.notify("plz: " .. err, vim.log.levels.ERROR)
-      return
-    end
+    if err then return end
     state.files = file_list or {}
     try_show()
   end)
@@ -195,7 +194,6 @@ query {
 
   gh.run({ "api", "graphql", "-f", "query=" .. query }, function(data, err)
     if err then
-      vim.notify("plz: commits: " .. err, vim.log.levels.WARN)
       state.commits = {}
       callback()
       return
@@ -315,10 +313,7 @@ function M._enter_commit_mode(commit)
   gh.run({
     "api", string.format("repos/%s/%s/commits/%s", owner, repo, commit.oid),
   }, function(data, err)
-    if err then
-      vim.notify("plz: " .. err, vim.log.levels.ERROR)
-      return
-    end
+    if err then return end
     -- Guard: review may have been closed while fetching
     if not state.commit_mode or not state.collections then return end
 

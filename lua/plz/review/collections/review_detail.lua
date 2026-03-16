@@ -83,7 +83,6 @@ function M.fetch_reviews(owner, repo, pr_number, callback)
     "api", string.format("repos/%s/%s/pulls/%d/reviews?per_page=100", owner, repo, pr_number),
   }, function(reviews, err)
     if err then
-      vim.notify("plz: reviews: " .. err, vim.log.levels.WARN)
       state.reviews = {}
       if callback then callback() end
       return
