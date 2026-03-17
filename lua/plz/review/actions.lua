@@ -100,6 +100,69 @@ function M.add_comment(body, callback)
   end)
 end
 
+--- Edit a review comment.
+--- @param comment_id number
+--- @param new_body string
+--- @param callback function|nil
+function M.edit_review_comment(comment_id, new_body, callback)
+  local owner, repo = owner_repo()
+  if not owner then
+    vim.notify("plz: cannot determine repo", vim.log.levels.ERROR)
+    return
+  end
+
+  local pr_number = state.pr.number
+  gh.run({
+    "api", string.format("repos/%s/%s/pulls/comments/%d", owner, repo, comment_id),
+    "-X", "PATCH",
+    "-f", "body=" .. new_body,
+  }, function(_data, err)
+    if err then
+      vim.notify("plz: failed to edit comment", vim.log.levels.ERROR)
+      return
+    end
+    vim.notify("plz: comment updated", vim.log.levels.INFO)
+
+    local comments_mod = require("plz.review.comments")
+    comments_mod.fetch_review_comments(owner, repo, pr_number)
+
+    local review_detail = require("plz.review.collections.review_detail")
+    review_detail.fetch_reviews(owner, repo, pr_number)
+
+    if callback then callback() end
+  end)
+end
+
+--- Edit an issue (timeline) comment.
+--- @param comment_id number
+--- @param new_body string
+--- @param callback function|nil
+function M.edit_issue_comment(comment_id, new_body, callback)
+  local owner, repo = owner_repo()
+  if not owner then
+    vim.notify("plz: cannot determine repo", vim.log.levels.ERROR)
+    return
+  end
+
+  local pr_number = state.pr.number
+  gh.run({
+    "api", string.format("repos/%s/%s/issues/comments/%d", owner, repo, comment_id),
+    "-X", "PATCH",
+    "-f", "body=" .. new_body,
+  }, function(_data, err)
+    if err then
+      vim.notify("plz: failed to edit comment", vim.log.levels.ERROR)
+      return
+    end
+    vim.notify("plz: comment updated", vim.log.levels.INFO)
+
+    local review_detail = require("plz.review.collections.review_detail")
+    review_detail.fetch_issue_comments(owner, repo, pr_number)
+
+    if callback then callback() end
+  end)
+end
+
 --- Prompt user and add a top-level comment.
 function M.prompt_add_comment()
   vim.ui.input({ prompt = "Comment: " }, function(input)

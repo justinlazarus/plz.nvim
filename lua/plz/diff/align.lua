@@ -25,27 +25,6 @@ function M.build(old_lines, new_lines, diff_result)
     end
   end
 
-  -- Fill small gaps in add_set and rem_set. Difftastic may skip
-  -- whitespace-only lines within an insertion/deletion block (e.g. blank
-  -- lines). If such a gap is small (≤2 lines) between consecutive reported
-  -- entries, fill it so the unreported lines aren't consumed as unchanged
-  -- pairs, which would break alignment.
-  local function fill_set_gaps(set)
-    local sorted = {}
-    for line in pairs(set) do table.insert(sorted, line) end
-    table.sort(sorted)
-    for i = 2, #sorted do
-      local gap_size = sorted[i] - sorted[i - 1] - 1
-      if gap_size > 0 and gap_size <= 2 then
-        for g = sorted[i - 1] + 1, sorted[i] - 1 do
-          set[g] = true
-        end
-      end
-    end
-  end
-  fill_set_gaps(add_set)
-  fill_set_gaps(rem_set)
-
   table.sort(anchors, function(a, b) return a.lhs < b.lhs end)
 
   -- Filter out crossed anchors: both lhs and rhs must be monotonically
@@ -94,49 +73,97 @@ end
 
 --- Fill a gap between two anchors, interleaving unchanged pairs with
 --- additions (rhs-only) and removals (lhs-only).
+---
+--- Uses a bounded lookahead when content doesn't match to find the
+--- correct pairing, avoiding the misalignment caused by blindly
+--- pairing lines or extending add/remove runs.
 function M._fill_gap(p_lhs, p_rhs, old_lines, new_lines,
                      lhs_start, lhs_end, rhs_start, rhs_end,
                      rem_set, add_set)
   local li = lhs_start
   local ri = rhs_start
 
-  -- Track whether we're in a run of consecutive adds/removes so we can
-  -- detect unreported lines that belong to the same block.
-  local in_add_run = false
-  local in_rem_run = false
+  local LOOKAHEAD = 50
 
   while li <= lhs_end and ri <= rhs_end do
     if rem_set[li] then
       table.insert(p_lhs, { text = old_lines[li + 1] or "", orig = li })
       table.insert(p_rhs, { text = "", orig = nil })
       li = li + 1
-      in_rem_run = true
-      in_add_run = false
     elseif add_set[ri] then
       table.insert(p_lhs, { text = "", orig = nil })
       table.insert(p_rhs, { text = new_lines[ri + 1] or "", orig = ri })
       ri = ri + 1
-      in_add_run = true
-      in_rem_run = false
-    elseif in_add_run and (old_lines[li + 1] or "") ~= (new_lines[ri + 1] or "") then
-      -- Unreported add: we were in an add run and the lines don't match,
-      -- so this RHS line is part of the same insertion block.
-      table.insert(p_lhs, { text = "", orig = nil })
-      table.insert(p_rhs, { text = new_lines[ri + 1] or "", orig = ri })
-      ri = ri + 1
-    elseif in_rem_run and (old_lines[li + 1] or "") ~= (new_lines[ri + 1] or "") then
-      -- Unreported remove: same logic for removal runs.
-      table.insert(p_lhs, { text = old_lines[li + 1] or "", orig = li })
-      table.insert(p_rhs, { text = "", orig = nil })
-      li = li + 1
     else
-      -- Unchanged pair
-      table.insert(p_lhs, { text = old_lines[li + 1] or "", orig = li })
-      table.insert(p_rhs, { text = new_lines[ri + 1] or "", orig = ri })
-      li = li + 1
-      ri = ri + 1
-      in_add_run = false
-      in_rem_run = false
+      local lhs_text = old_lines[li + 1] or ""
+      local rhs_text = new_lines[ri + 1] or ""
+      if lhs_text == rhs_text
+        or (lhs_text:match("^%s*(.-)%s*$") == rhs_text:match("^%s*(.-)%s*$")
+            and #lhs_text:match("^%s*(.-)%s*$") >= 3) then
+        -- Unchanged pair (exact or trimmed match for re-indented lines)
+        table.insert(p_lhs, { text = lhs_text, orig = li })
+        table.insert(p_rhs, { text = rhs_text, orig = ri })
+        li = li + 1
+        ri = ri + 1
+      else
+        -- Content mismatch: use lookahead to find where the match resumes.
+        -- Look for lhs_text in upcoming RHS lines (it's an add run on RHS).
+        -- Look for rhs_text in upcoming LHS lines (it's a remove run on LHS).
+        -- Use trimmed comparison to handle re-indented lines.
+        local lhs_trimmed = lhs_text:match("^%s*(.-)%s*$")
+        local rhs_trimmed = rhs_text:match("^%s*(.-)%s*$")
+
+        -- Skip trivial matches on very short trimmed content (braces, etc.)
+        local min_trim_len = 3
+
+        local rhs_match = nil
+        for look = 1, math.min(LOOKAHEAD, rhs_end - ri) do
+          local candidate = new_lines[ri + look + 1] or ""
+          if not add_set[ri + look] then
+            local cand_trimmed = candidate:match("^%s*(.-)%s*$")
+            -- Only match on significant content (skip blank lines, braces)
+            if #lhs_trimmed >= min_trim_len and (candidate == lhs_text or cand_trimmed == lhs_trimmed) then
+              rhs_match = look
+              break
+            end
+          end
+        end
+
+        local lhs_match = nil
+        for look = 1, math.min(LOOKAHEAD, lhs_end - li) do
+          local candidate = old_lines[li + look + 1] or ""
+          if not rem_set[li + look] then
+            local cand_trimmed = candidate:match("^%s*(.-)%s*$")
+            -- Only match on significant content (skip blank lines, braces)
+            if #rhs_trimmed >= min_trim_len and (candidate == rhs_text or cand_trimmed == rhs_trimmed) then
+              lhs_match = look
+              break
+            end
+          end
+        end
+
+        if rhs_match and (not lhs_match or rhs_match <= lhs_match) then
+          -- RHS has intervening adds before the match: emit them
+          for k = 0, rhs_match - 1 do
+            table.insert(p_lhs, { text = "", orig = nil })
+            table.insert(p_rhs, { text = new_lines[ri + 1] or "", orig = ri })
+            ri = ri + 1
+          end
+        elseif lhs_match then
+          -- LHS has intervening removes before the match: emit them
+          for k = 0, lhs_match - 1 do
+            table.insert(p_lhs, { text = old_lines[li + 1] or "", orig = li })
+            table.insert(p_rhs, { text = "", orig = nil })
+            li = li + 1
+          end
+        else
+          -- No match found within lookahead: pair them as a change
+          table.insert(p_lhs, { text = lhs_text, orig = li })
+          table.insert(p_rhs, { text = rhs_text, orig = ri })
+          li = li + 1
+          ri = ri + 1
+        end
+      end
     end
   end
 

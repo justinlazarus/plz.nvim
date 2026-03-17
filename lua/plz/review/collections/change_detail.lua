@@ -683,6 +683,7 @@ function M.setup_file_keymaps(review)
         "  <CR>            select review / go to comment in diff",
         "  g               go to thread in diff (from top)",
         "  r               reply to thread",
+        "  e               edit comment",
         "  dd              delete review / comment",
         "  R               resolve/unresolve thread",
         "  o               open review in browser",

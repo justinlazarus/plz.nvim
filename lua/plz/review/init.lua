@@ -605,6 +605,26 @@ function M._setup_keymaps()
       actions.toggle_thread_resolved(node_id, not is_resolved)
     end, vim.tbl_extend("force", r_opts, { desc = "Toggle resolve thread" }))
 
+    -- Edit issue comment at cursor
+    vim.keymap.set("n", "e", function()
+      if state.active_collection ~= 2 then return end
+      local items = state.c2_items or {}
+      local win = state.top_win
+      if not win or not vim.api.nvim_win_is_valid(win) then return end
+      local row = vim.api.nvim_win_get_cursor(win)[1]
+      local item = items[row]
+      if not item then return end
+      if item.type == "comment" and item.comment then
+        local body = (item.comment.body or ""):gsub("\r", "")
+        vim.ui.input({ prompt = "Edit comment: ", default = body }, function(input)
+          if not input or input == "" or input == body then return end
+          actions.edit_issue_comment(item.comment.id, input)
+        end)
+      else
+        vim.notify("plz: can only edit issue comments from here — use e in thread view for review comments", vim.log.levels.WARN)
+      end
+    end, vim.tbl_extend("force", r_opts, { desc = "Edit comment" }))
+
     -- Dismiss review / delete issue comment at cursor
     vim.keymap.set("n", "dd", function()
       if state.active_collection ~= 2 then return end
@@ -669,6 +689,43 @@ function M._setup_keymaps()
       end
       M._jump_to_thread(entry.thread)
     end, vim.tbl_extend("force", rt_opts, { desc = "Go to comment in diff" }))
+
+    -- Edit comment at cursor
+    vim.keymap.set("n", "e", function()
+      local row = vim.api.nvim_win_get_cursor(0)[1]
+      local entry = (state.c2_line_map or {})[row]
+
+      -- Check if this is an issue comment item
+      local idx = state.selected_review_idx
+      local item = idx and (state.c2_items or {})[idx]
+      if item and item.type == "comment" and item.comment then
+        local body = (item.comment.body or ""):gsub("\r", "")
+        vim.ui.input({ prompt = "Edit comment: ", default = body }, function(input)
+          if not input or input == "" or input == body then return end
+          actions.edit_issue_comment(item.comment.id, input)
+        end)
+        return
+      end
+
+      -- Review thread comment
+      if not entry or not entry.comment_id then
+        vim.notify("plz: no comment at cursor", vim.log.levels.WARN)
+        return
+      end
+      -- Find the comment body for the default text
+      local comment_body = ""
+      local all_comments = state.review_comments or {}
+      for _, c in ipairs(all_comments) do
+        if c.id == entry.comment_id then
+          comment_body = (c.body or ""):gsub("\r", "")
+          break
+        end
+      end
+      vim.ui.input({ prompt = "Edit comment: ", default = comment_body }, function(input)
+        if not input or input == "" or input == comment_body then return end
+        actions.edit_review_comment(entry.comment_id, input)
+      end)
+    end, vim.tbl_extend("force", rt_opts, { desc = "Edit comment" }))
 
     -- Delete/dismiss at cursor
     vim.keymap.set("n", "dd", function()
