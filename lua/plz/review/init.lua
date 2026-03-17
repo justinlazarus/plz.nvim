@@ -5,6 +5,7 @@ local summary = require("plz.review.summary")
 local layout = require("plz.review.layout")
 local review_detail = require("plz.review.collections.review_detail")
 local change_detail = require("plz.review.collections.change_detail")
+local actions = require("plz.review.actions")
 
 local M = {}
 
@@ -63,6 +64,7 @@ summary.setup(state)
 layout.setup(state)
 review_detail.setup(state)
 change_detail.setup(state)
+actions.setup(state)
 
 --- Open review for a PR from the dashboard.
 function M.open(pr)
@@ -123,6 +125,9 @@ function M.open(pr)
 
   -- Fetch thread resolution status via GraphQL
   review_detail.fetch_thread_resolution(owner, repo, pr.number)
+
+  -- Fetch issue (timeline) comments in background
+  review_detail.fetch_issue_comments(owner, repo, pr.number)
 end
 
 --- Ensure a single SHA is available locally, fetching if needed.
@@ -435,6 +440,39 @@ function M._render()
   files.render()
 end
 
+--- Jump from C2 to the thread's location in C3 diff view.
+--- @param thread table  Enriched thread with path, line, root_id
+function M._jump_to_thread(thread)
+  local path = thread.path
+  local line = thread.line
+  if not path or path == "" then
+    vim.notify("plz: thread has no file location", vim.log.levels.WARN)
+    return
+  end
+
+  -- Find the file index matching this thread's path
+  local file_idx
+  for i, f in ipairs(state.files) do
+    if (f.filename or f.path) == path then
+      file_idx = i
+      break
+    end
+  end
+  if not file_idx then
+    vim.notify("plz: file not found in PR — " .. path, vim.log.levels.WARN)
+    return
+  end
+
+  -- Switch to C3 and open the diff, then jump to the comment line
+  state.expanded_comments = {}
+  -- Mark the target line to expand after diff loads
+  state._jump_to_line = (type(line) == "number") and line or tonumber(line)
+  state._jump_to_path = path
+
+  layout.switch_to(3)
+  change_detail.open_diff(file_idx)
+end
+
 --- Set up keymaps for all collection buffers.
 function M._setup_keymaps()
   -- C3 file list keymaps (delegated to change_detail)
@@ -504,6 +542,21 @@ function M._setup_keymaps()
       end
     end, vim.tbl_extend("force", r_opts, { desc = "Select thread" }))
 
+    -- Jump to first thread's location in C3 diff
+    vim.keymap.set("n", "g", function()
+      if state.active_collection ~= 2 then return end
+      local items = state.c2_items or {}
+      local win = state.top_win
+      if not win or not vim.api.nvim_win_is_valid(win) then return end
+      local row = vim.api.nvim_win_get_cursor(win)[1]
+      local item = items[row]
+      if not item or not item.threads or #item.threads == 0 then
+        vim.notify("plz: no thread to jump to", vim.log.levels.WARN)
+        return
+      end
+      M._jump_to_thread(item.threads[1])
+    end, vim.tbl_extend("force", r_opts, { desc = "Go to comment in diff" }))
+
     vim.keymap.set("n", "o", function()
       if state.active_collection ~= 2 then return end
       local items = state.c2_items or {}
@@ -522,6 +575,81 @@ function M._setup_keymaps()
     vim.keymap.set("n", "q", function()
       M.close()
     end, vim.tbl_extend("force", r_opts, { desc = "Close review" }))
+
+    -- Resolve/unresolve first unresolved thread in selected item
+    vim.keymap.set("n", "R", function()
+      if state.active_collection ~= 2 then return end
+      local items = state.c2_items or {}
+      local win = state.top_win
+      if not win or not vim.api.nvim_win_is_valid(win) then return end
+      local row = vim.api.nvim_win_get_cursor(win)[1]
+      local item = items[row]
+      if not item or not item.threads or #item.threads == 0 then
+        vim.notify("plz: no threads in this item", vim.log.levels.WARN)
+        return
+      end
+      -- Find first thread to toggle (prefer unresolved, else first)
+      local target
+      for _, thr in ipairs(item.threads) do
+        if thr.resolved == false then target = thr; break end
+      end
+      if not target then target = item.threads[1] end
+      local root_id = target.root_id
+      if not root_id then return end
+      local node_id = (state.thread_node_ids or {})[root_id]
+      if not node_id then
+        vim.notify("plz: thread ID not found — try refreshing", vim.log.levels.WARN)
+        return
+      end
+      local is_resolved = (state.thread_resolved or {})[root_id]
+      actions.toggle_thread_resolved(node_id, not is_resolved)
+    end, vim.tbl_extend("force", r_opts, { desc = "Toggle resolve thread" }))
+
+    -- Dismiss review / delete issue comment at cursor
+    vim.keymap.set("n", "dd", function()
+      if state.active_collection ~= 2 then return end
+      local items = state.c2_items or {}
+      local win = state.top_win
+      if not win or not vim.api.nvim_win_is_valid(win) then return end
+      local row = vim.api.nvim_win_get_cursor(win)[1]
+      local item = items[row]
+      if not item then return end
+      if item.type == "review" and item.review then
+        vim.ui.input({ prompt = "Delete review? (y/N): " }, function(input)
+          if input and input:lower() == "y" then
+            actions.delete_review(item.review.id)
+          end
+        end)
+      elseif item.type == "comment" and item.comment then
+        vim.ui.input({ prompt = "Delete comment? (y/N): " }, function(input)
+          if input and input:lower() == "y" then
+            actions.delete_issue_comment(item.comment.id)
+          end
+        end)
+      else
+        vim.notify("plz: cannot delete this item", vim.log.levels.WARN)
+      end
+    end, vim.tbl_extend("force", r_opts, { desc = "Dismiss review / delete comment" }))
+
+    -- Reply to first thread in selected item
+    vim.keymap.set("n", "r", function()
+      if state.active_collection ~= 2 then return end
+      local items = state.c2_items or {}
+      local win = state.top_win
+      if not win or not vim.api.nvim_win_is_valid(win) then return end
+      local row = vim.api.nvim_win_get_cursor(win)[1]
+      local item = items[row]
+      if not item or not item.threads or #item.threads == 0 then
+        vim.notify("plz: no threads in this item", vim.log.levels.WARN)
+        return
+      end
+      local root_id = item.threads[1].root_id
+      if not root_id then return end
+      vim.ui.input({ prompt = "Reply: " }, function(input)
+        if not input or input == "" then return end
+        actions.reply_to_comment(root_id, input)
+      end)
+    end, vim.tbl_extend("force", r_opts, { desc = "Reply to thread" }))
   end
 
   -- C2 bottom (review threads) buffer keymaps
@@ -530,22 +658,125 @@ function M._setup_keymaps()
     vim.keymap.set("n", "q", function()
       M.close()
     end, vim.tbl_extend("force", rt_opts, { desc = "Close review" }))
+
+    -- Jump to thread location in C3 diff
+    vim.keymap.set("n", "<CR>", function()
+      local row = vim.api.nvim_win_get_cursor(0)[1]
+      local entry = (state.c2_line_map or {})[row]
+      if not entry or not entry.thread then
+        vim.notify("plz: no thread at cursor", vim.log.levels.WARN)
+        return
+      end
+      M._jump_to_thread(entry.thread)
+    end, vim.tbl_extend("force", rt_opts, { desc = "Go to comment in diff" }))
+
+    -- Delete/dismiss at cursor
+    vim.keymap.set("n", "dd", function()
+      local row = vim.api.nvim_win_get_cursor(0)[1]
+      local entry = (state.c2_line_map or {})[row]
+
+      -- Check if this is an issue comment item (whole bottom is one comment)
+      local idx = state.selected_review_idx
+      local item = idx and (state.c2_items or {})[idx]
+      if item and item.type == "comment" and item.comment then
+        vim.ui.input({ prompt = "Delete comment? (y/N): " }, function(input)
+          if input and input:lower() == "y" then
+            actions.delete_issue_comment(item.comment.id)
+          end
+        end)
+        return
+      end
+
+      -- Review thread comment
+      if not entry or not entry.comment_id then
+        vim.notify("plz: no comment at cursor", vim.log.levels.WARN)
+        return
+      end
+      vim.ui.input({ prompt = "Delete comment? (y/N): " }, function(input)
+        if input and input:lower() == "y" then
+          actions.delete_comment(entry.comment_id)
+        end
+      end)
+    end, vim.tbl_extend("force", rt_opts, { desc = "Delete comment" }))
+
+    -- Reply to thread at cursor
+    vim.keymap.set("n", "r", function()
+      local row = vim.api.nvim_win_get_cursor(0)[1]
+      local entry = (state.c2_line_map or {})[row]
+      if not entry or not entry.thread then
+        vim.notify("plz: no thread at cursor", vim.log.levels.WARN)
+        return
+      end
+      local root_id = entry.thread.root_id
+      if not root_id then return end
+      vim.ui.input({ prompt = "Reply: " }, function(input)
+        if not input or input == "" then return end
+        actions.reply_to_comment(root_id, input)
+      end)
+    end, vim.tbl_extend("force", rt_opts, { desc = "Reply to thread" }))
+
+    -- Resolve/unresolve thread at cursor
+    vim.keymap.set("n", "R", function()
+      local row = vim.api.nvim_win_get_cursor(0)[1]
+      local entry = (state.c2_line_map or {})[row]
+      if not entry or not entry.thread then
+        vim.notify("plz: no thread at cursor (line " .. row .. ")", vim.log.levels.WARN)
+        return
+      end
+      local root_id = entry.thread.root_id
+      if not root_id then
+        vim.notify("plz: thread has no root_id", vim.log.levels.WARN)
+        return
+      end
+      local node_id = (state.thread_node_ids or {})[root_id]
+      if not node_id then
+        -- Show what we have for debugging
+        local ids = state.thread_node_ids or {}
+        local count = 0
+        for _ in pairs(ids) do count = count + 1 end
+        vim.notify("plz: thread ID not found for root " .. tostring(root_id)
+          .. " (" .. count .. " threads known)", vim.log.levels.WARN)
+        return
+      end
+      local is_resolved = (state.thread_resolved or {})[root_id]
+      actions.toggle_thread_resolved(node_id, not is_resolved)
+    end, vim.tbl_extend("force", rt_opts, { desc = "Toggle resolve thread" }))
+  end
+
+  -- Review action keymaps on all collection buffers (C1, C2; C3 set below)
+  local action_bufs = {}
+  if c1 then
+    if c1.top_buf then table.insert(action_bufs, c1.top_buf) end
+    if c1.bottom_buf then table.insert(action_bufs, c1.bottom_buf) end
+  end
+  if c2 then
+    if c2.top_buf then table.insert(action_bufs, c2.top_buf) end
+    if c2.bottom_buf then table.insert(action_bufs, c2.bottom_buf) end
+  end
+  for _, buf in ipairs(action_bufs) do
+    vim.keymap.set("n", "A", function()
+      actions.prompt_submit_review("APPROVE")
+    end, { buffer = buf, nowait = true, desc = "Approve PR" })
+
+    vim.keymap.set("n", "X", function()
+      actions.prompt_submit_review("REQUEST_CHANGES")
+    end, { buffer = buf, nowait = true, desc = "Request changes" })
+
+    vim.keymap.set("n", "C", function()
+      actions.prompt_submit_review("COMMENT")
+    end, { buffer = buf, nowait = true, desc = "Submit comment review" })
+
+    vim.keymap.set("n", "gc", function()
+      actions.prompt_add_comment()
+    end, { buffer = buf, nowait = true, desc = "Add PR comment" })
   end
 
   -- Help keymap on all collection buffers (C3 is set in change_detail)
-  local help_bufs = {}
-  if c1 then
-    if c1.top_buf then table.insert(help_bufs, c1.top_buf) end
-    if c1.bottom_buf then table.insert(help_bufs, c1.bottom_buf) end
-  end
-  if c2 then
-    if c2.top_buf then table.insert(help_bufs, c2.top_buf) end
-    if c2.bottom_buf then table.insert(help_bufs, c2.bottom_buf) end
-  end
+  local help_bufs = action_bufs
   for _, buf in ipairs(help_bufs) do
     vim.keymap.set("n", "?", function()
-      local help = change_detail._help_lines
-      if help then require("plz.help").toggle(help) end
+      local build = change_detail._build_help
+      if build then require("plz.help").toggle(build()) end
     end, { buffer = buf, nowait = true, desc = "Toggle help" })
   end
 end
@@ -618,6 +849,9 @@ function M.close()
   state.comments_by_review = {}
   state.c2_items = {}
   state.thread_resolved = {}
+  state.thread_node_ids = {}
+  state.c2_line_map = {}
+  state.issue_comments = {}
   state.selected_review_idx = nil
 end
 

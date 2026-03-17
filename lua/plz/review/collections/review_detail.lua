@@ -73,6 +73,47 @@ local function display_name(user)
   return login:match("^([^_]+)") or login
 end
 
+--- Re-render the C2 bottom buffer (thread detail) if a thread is currently selected.
+--- Call this after any data refresh that may affect thread content or resolved status.
+function M.refresh_selected_thread()
+  if state.active_collection ~= 2 then return end
+  local idx = state.selected_review_idx
+  if not idx then return end
+  local c = state.collections and state.collections[2]
+  if not c or not c.bottom_buf or not vim.api.nvim_buf_is_valid(c.bottom_buf) then return end
+  M.render_threads(c.bottom_buf, state.bottom_win, idx)
+end
+
+--- Fetch issue (timeline) comments for the PR.
+--- @param owner string
+--- @param repo string
+--- @param pr_number number
+--- @param callback function|nil
+function M.fetch_issue_comments(owner, repo, pr_number, callback)
+  gh.run({
+    "api", string.format("repos/%s/%s/issues/%d/comments?per_page=100", owner, repo, pr_number),
+  }, function(comments, err)
+    if err then
+      state.issue_comments = {}
+      if callback then callback() end
+      return
+    end
+    state.issue_comments = comments or {}
+    M.build_thread_list()
+
+    -- Re-render if C2 is active
+    if state.active_collection == 2 then
+      local c = state.collections and state.collections[2]
+      if c and c.top_buf and vim.api.nvim_buf_is_valid(c.top_buf) then
+        M.render_reviews(c.top_buf, state.top_win)
+      end
+      M.refresh_selected_thread()
+    end
+
+    if callback then callback() end
+  end)
+end
+
 --- Fetch review submissions for the PR.
 --- @param owner string
 --- @param repo string
@@ -112,6 +153,7 @@ function M.fetch_reviews(owner, repo, pr_number, callback)
       if c and c.top_buf and vim.api.nvim_buf_is_valid(c.top_buf) then
         M.render_reviews(c.top_buf, state.top_win)
       end
+      M.refresh_selected_thread()
     end
 
     if callback then callback() end
@@ -129,6 +171,7 @@ query {
     pullRequest(number: %d) {
       reviewThreads(first: 100) {
         nodes {
+          id
           isResolved
           comments(first: 1) {
             nodes { databaseId }
@@ -144,10 +187,12 @@ query {
     local pr_data = (((data or {}).data or {}).repository or {}).pullRequest
     local thread_nodes = pr_data and pr_data.reviewThreads and pr_data.reviewThreads.nodes or {}
     state.thread_resolved = {}
+    state.thread_node_ids = {}  -- root_comment_id -> GraphQL node ID
     for _, t in ipairs(thread_nodes) do
-      local comments = t.comments and t.comments.nodes or {}
-      if #comments > 0 and comments[1].databaseId then
-        state.thread_resolved[comments[1].databaseId] = t.isResolved == true
+      local thread_comments = t.comments and t.comments.nodes or {}
+      if #thread_comments > 0 and thread_comments[1].databaseId then
+        state.thread_resolved[thread_comments[1].databaseId] = t.isResolved == true
+        state.thread_node_ids[thread_comments[1].databaseId] = t.id
       end
     end
     -- Rebuild thread list to pick up resolved status, then re-render
@@ -157,6 +202,7 @@ query {
       if c and c.top_buf and vim.api.nvim_buf_is_valid(c.top_buf) then
         M.render_reviews(c.top_buf, state.top_win)
       end
+      M.refresh_selected_thread()
     end
   end)
 end
@@ -349,12 +395,35 @@ function M.build_thread_list()
     })
   end
 
+  -- 5) Add issue (timeline) comments as individual items
+  for _, ic in ipairs(state.issue_comments or {}) do
+    local login = (ic.user and ic.user.login) or "?"
+    table.insert(items, {
+      type = "comment",
+      comment = ic,
+      threads = {},
+      thread_count = 0,
+      msg_count = 0,
+      participants = { display_name(ic.user) },
+      participant_logins = { login },
+      latest_at = ic.created_at or "",
+      resolved = nil,
+    })
+  end
+
   -- Sort by latest activity (newest first)
   table.sort(items, function(a, b) return a.latest_at > b.latest_at end)
 
   -- Collect all unique logins and assign colors
   local seen_logins = {}
   local unique_logins = {}
+  for _, ic in ipairs(state.issue_comments or {}) do
+    local login = (ic.user and ic.user.login) or "?"
+    if not seen_logins[login] then
+      seen_logins[login] = true
+      table.insert(unique_logins, login)
+    end
+  end
   for _, c in ipairs(all_comments) do
     local login = (c.user and c.user.login) or "?"
     if not seen_logins[login] then
@@ -464,10 +533,12 @@ function M.render_reviews(buf, win)
       if item.resolved == true then
         status_icon, status_hl = "●", "PlzSuccess"
       elseif item.resolved == false then
-        status_icon, status_hl = "○", "PlzYellow"
+        status_icon, status_hl = "○", "PlzUnresolved"
       else
         status_icon, status_hl = " ", "PlzFaint"
       end
+    elseif item.type == "comment" then
+      status_icon, status_hl = icons.comments or "💬", "PlzFaint"
     elseif item.review then
       local rs = (item.review.state or "")
       if rs == "APPROVED" then
@@ -501,13 +572,14 @@ function M.render_reviews(buf, win)
 
     -- What column (last, no padding)
     local tail
-    if item.review then
+    if item.type == "comment" then
+      -- Issue comment: show truncated body preview
+      local body = (item.comment.body or ""):gsub("\r", ""):gsub("\n", " ")
+      if #body > 40 then body = body:sub(1, 39) .. "…" end
+      tail = "comment" .. (body ~= "" and (": " .. body) or "")
+    elseif item.review then
       local rs = (item.review.state or ""):lower():gsub("_", " ")
-      if item.thread_count and item.thread_count > 0 then
-        tail = rs
-      else
-        tail = rs
-      end
+      tail = rs
     else
       -- Unattached thread
       local thr = item.threads and item.threads[1]
@@ -685,28 +757,52 @@ function M.render_threads(buf, win, item_idx)
     end
   end
 
+  -- Line-to-comment/thread map: line_idx (1-based) -> { comment_id, thread }
+  local line_map = {}
+
   --- Helper: render a single thread as a bordered box
   local function render_thread(thr)
     -- Top border
     local top = "╭" .. string.rep("─", box_w - 2) .. "╮"
     table.insert(lines, top)
     table.insert(hl_regions, { { 0, #top, "PlzBorder" } })
+    line_map[#lines] = { thread = thr }
 
-    -- File:line header
+    -- File:line header with resolved status (indicator left of path)
     local path_ref = thr.path or ""
     if path_ref ~= "" and thr.line ~= "" then
       path_ref = path_ref .. ":" .. tostring(thr.line)
     end
-    if path_ref ~= "" then
-      add_box_line(path_ref, { { 0, #path_ref, "PlzFaint" } })
+    local resolved_prefix = ""
+    local resolved_hl = "PlzFaint"
+    if thr.resolved == true then
+      resolved_prefix = "● resolved  "
+      resolved_hl = "PlzSuccess"
+    elseif thr.resolved == false then
+      resolved_prefix = "○ unresolved  "
+      resolved_hl = "PlzUnresolved"
+    end
+    local header = resolved_prefix .. path_ref
+    if header ~= "" then
+      local regions = {}
+      if resolved_prefix ~= "" then
+        table.insert(regions, { 0, #resolved_prefix, resolved_hl })
+      end
+      if path_ref ~= "" then
+        table.insert(regions, { #resolved_prefix, #header, "PlzFaint" })
+      end
+      add_box_line(header, regions)
+      line_map[#lines] = { thread = thr }
     else
       add_box_line("", {})
+      line_map[#lines] = { thread = thr }
     end
 
     -- Horizontal rule under location
     local rule = "├" .. string.rep("─", box_w - 2) .. "┤"
     table.insert(lines, rule)
     table.insert(hl_regions, { { 0, #rule, "PlzBorder" } })
+    line_map[#lines] = { thread = thr }
 
     -- Render each comment
     for ci, comment in ipairs(thr.comments) do
@@ -714,7 +810,6 @@ function M.render_threads(buf, win, item_idx)
       local name = display_name(comment.user)
       local hl = author_hl(login)
       local date_str, time_str = format_datetime(comment.created_at)
-      local is_reply = ci > 1
 
       -- Author line
       local author_line = name .. "  " .. date_str .. "  " .. time_str
@@ -724,6 +819,7 @@ function M.render_threads(buf, win, item_idx)
         { 0, name_end, hl },
         { meta_start, #author_line, "PlzFaint" },
       })
+      line_map[#lines] = { comment_id = comment.id, thread = thr }
 
       -- Comment body
       local cbody = (comment.body or ""):gsub("\r", "")
@@ -732,6 +828,7 @@ function M.render_threads(buf, win, item_idx)
       if cbody ~= "" then
         for _, raw in ipairs(vim.split(cbody, "\n", { plain = true })) do
           add_box_line(raw, {})
+          line_map[#lines] = { comment_id = comment.id, thread = thr }
         end
       end
     end
@@ -740,33 +837,77 @@ function M.render_threads(buf, win, item_idx)
     local bot = "╰" .. string.rep("─", box_w - 2) .. "╯"
     table.insert(lines, bot)
     table.insert(hl_regions, { { 0, #bot, "PlzBorder" } })
+    line_map[#lines] = { thread = thr }
   end
 
-  -- Review body (if present, render just the body text)
-  local r = item.review
-  if r then
-    local body = r.body or ""
-    if body ~= "" then
-      body = body:gsub("\r", ""):gsub("<!%-%-.-%-%->", "")
-      body = body:gsub("\n\n\n+", "\n\n")
-      body = vim.trim(body)
-      for _, raw in ipairs(vim.split(body, "\n", { plain = true })) do
-        table.insert(lines, raw)
+  -- Issue comment: render as a single bordered box
+  if item.type == "comment" and item.comment then
+    local ic = item.comment
+    local login = (ic.user and ic.user.login) or "?"
+    local name = display_name(ic.user)
+    local hl = author_hl(login)
+    local date_str, time_str = format_datetime(ic.created_at)
+
+    -- Top border
+    local top_b = "╭" .. string.rep("─", box_w - 2) .. "╮"
+    table.insert(lines, top_b)
+    table.insert(hl_regions, { { 0, #top_b, "PlzBorder" } })
+
+    -- Author line
+    local author_line = name .. "  " .. date_str .. "  " .. time_str
+    local name_end = #name
+    local meta_start = name_end + 2
+    add_box_line(author_line, {
+      { 0, name_end, hl },
+      { meta_start, #author_line, "PlzFaint" },
+    })
+
+    -- Separator
+    local rule = "├" .. string.rep("─", box_w - 2) .. "┤"
+    table.insert(lines, rule)
+    table.insert(hl_regions, { { 0, #rule, "PlzBorder" } })
+
+    -- Body
+    local cbody = (ic.body or ""):gsub("\r", "")
+    cbody = cbody:gsub("<!%-%-.-%-%->", "")
+    cbody = vim.trim(cbody)
+    if cbody ~= "" then
+      for _, raw in ipairs(vim.split(cbody, "\n", { plain = true })) do
+        add_box_line(raw, {})
+      end
+    end
+
+    -- Bottom border
+    local bot_b = "╰" .. string.rep("─", box_w - 2) .. "╯"
+    table.insert(lines, bot_b)
+    table.insert(hl_regions, { { 0, #bot_b, "PlzBorder" } })
+  else
+    -- Review body (if present, render just the body text)
+    local r = item.review
+    if r then
+      local body = r.body or ""
+      if body ~= "" then
+        body = body:gsub("\r", ""):gsub("<!%-%-.-%-%->", "")
+        body = body:gsub("\n\n\n+", "\n\n")
+        body = vim.trim(body)
+        for _, raw in ipairs(vim.split(body, "\n", { plain = true })) do
+          table.insert(lines, raw)
+          table.insert(hl_regions, {})
+        end
+        table.insert(lines, "")
         table.insert(hl_regions, {})
       end
-      table.insert(lines, "")
-      table.insert(hl_regions, {})
     end
-  end
 
-  -- Render each thread as a bordered box
-  local review_threads = item.threads or {}
-  for ti, thr in ipairs(review_threads) do
-    if ti > 1 then
-      table.insert(lines, "")
-      table.insert(hl_regions, {})
+    -- Render each thread as a bordered box
+    local review_threads = item.threads or {}
+    for ti, thr in ipairs(review_threads) do
+      if ti > 1 then
+        table.insert(lines, "")
+        table.insert(hl_regions, {})
+      end
+      render_thread(thr)
     end
-    render_thread(thr)
   end
 
   if win and vim.api.nvim_win_is_valid(win) then
@@ -792,6 +933,9 @@ function M.render_threads(buf, win, item_idx)
       end
     end
   end
+
+  -- Store line map for comment/thread actions
+  state.c2_line_map = line_map
 end
 
 return M

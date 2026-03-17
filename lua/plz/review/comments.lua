@@ -36,6 +36,14 @@ function M.fetch_review_comments(owner, repo, pr_number)
     if ok then
       rd.index_comments_by_review()
       rd.build_thread_list()
+      -- Re-render C2 top and selected thread detail
+      if state.active_collection == 2 then
+        local c = state.collections and state.collections[2]
+        if c and c.top_buf and vim.api.nvim_buf_is_valid(c.top_buf) then
+          rd.render_reviews(c.top_buf, state.top_win)
+        end
+        rd.refresh_selected_thread()
+      end
     end
     -- Re-render file list to show comment counts
     if state.buf and vim.api.nvim_buf_is_valid(state.buf) then

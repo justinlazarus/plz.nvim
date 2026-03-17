@@ -195,6 +195,49 @@ function M.populate_diff(data)
   -- Continue cross-file comment jump if pending
   comments.continue_jump_after_load()
 
+  -- Jump to specific line if requested from C2
+  if state._jump_to_line then
+    local target_line = state._jump_to_line
+    state._jump_to_line = nil
+    state._jump_to_path = nil
+
+    -- Find the buffer line that maps to this original line
+    local layout_mod = require("plz.diff.layout")
+    local rhs_nums = layout_mod._line_nums[state.diff_rhs_buf] or {}
+    local buf_line
+    for lnum, orig in pairs(rhs_nums) do
+      if orig == target_line then
+        buf_line = lnum
+        break
+      end
+    end
+    -- Fallback: try LHS
+    if not buf_line then
+      local lhs_nums = layout_mod._line_nums[state.diff_lhs_buf] or {}
+      for lnum, orig in pairs(lhs_nums) do
+        if orig == target_line then
+          buf_line = lnum
+          break
+        end
+      end
+    end
+
+    if buf_line then
+      -- Expand the comment at this line
+      local side = "RIGHT"
+      local key = side .. ":" .. state.diff_rhs_buf .. ":" .. buf_line
+      state.expanded_comments[key] = true
+      comments.show_comment_indicators()
+
+      -- Move cursor to the line
+      local rhs_win = state.diff_rhs_win
+      if rhs_win and vim.api.nvim_win_is_valid(rhs_win) then
+        pcall(vim.api.nvim_win_set_cursor, rhs_win, { buf_line, 0 })
+        vim.api.nvim_set_current_win(rhs_win)
+      end
+    end
+  end
+
   state._suppress_diff_focus = nil
 end
 
@@ -248,6 +291,51 @@ function M.setup_diff_keymaps(diff_state)
       vim.keymap.set("n", "[c", function()
         comments.jump_comment(-1)
       end, { buffer = buf, desc = "Previous comment" })
+
+      -- Review action keymaps on diff buffers
+      local actions = require("plz.review.actions")
+      vim.keymap.set("n", "A", function()
+        actions.prompt_submit_review("APPROVE")
+      end, { buffer = buf, desc = "Approve PR" })
+
+      vim.keymap.set("n", "X", function()
+        actions.prompt_submit_review("REQUEST_CHANGES")
+      end, { buffer = buf, desc = "Request changes" })
+
+      vim.keymap.set("n", "C", function()
+        actions.prompt_submit_review("COMMENT")
+      end, { buffer = buf, desc = "Submit comment review" })
+
+      vim.keymap.set("n", "gc", function()
+        actions.prompt_add_comment()
+      end, { buffer = buf, desc = "Add PR comment" })
+
+      -- Inline comment at cursor
+      vim.keymap.set("n", "cc", function()
+        local layout_mod = require("plz.diff.layout")
+        local cursor_lnum = vim.api.nvim_win_get_cursor(0)[1]
+        local cur_buf = vim.api.nvim_get_current_buf()
+        local nums = layout_mod._line_nums[cur_buf]
+        local orig_line = nums and nums[cursor_lnum]
+        if not orig_line then
+          vim.notify("plz: no file line at cursor", vim.log.levels.WARN)
+          return
+        end
+        local side = (cur_buf == diff_state.lhs_buf) and "LEFT" or "RIGHT"
+        local file = state.files[state.current_file_idx]
+        if not file then return end
+        local path = file.filename or file.path
+        vim.ui.input({ prompt = "Inline comment: " }, function(input)
+          if not input or input == "" then return end
+          actions.add_inline_comment(path, orig_line, side, input)
+        end)
+      end, { buffer = buf, desc = "Add inline comment" })
+
+      vim.keymap.set("n", "?", function()
+        if M._build_help then
+          require("plz.help").toggle(M._build_help())
+        end
+      end, { buffer = buf, desc = "Toggle help" })
 
       layout.set_collection_keymaps(buf)
     end
@@ -402,7 +490,24 @@ function M.open_diff(file_idx)
         return
       end
       if err then
-        vim.notify("plz: " .. err, vim.log.levels.ERROR)
+        -- Fallback: show as side-by-side plain text (no syntax diff)
+        vim.notify("plz: difft failed, showing plain diff", vim.log.levels.WARN)
+        local old_lines = vim.split(base_content, "\n", { plain = true })
+        local new_lines = vim.split(head_content, "\n", { plain = true })
+        if #old_lines > 0 and old_lines[#old_lines] == "" then table.remove(old_lines) end
+        if #new_lines > 0 and new_lines[#new_lines] == "" then table.remove(new_lines) end
+        local max = math.max(#old_lines, #new_lines)
+        local padded_lhs, padded_rhs = {}, {}
+        for i = 1, max do
+          table.insert(padded_lhs, { text = old_lines[i] or "", orig = i <= #old_lines and (i - 1) or nil })
+          table.insert(padded_rhs, { text = new_lines[i] or "", orig = i <= #new_lines and (i - 1) or nil })
+        end
+        show_diff({
+          padded_lhs = padded_lhs,
+          padded_rhs = padded_rhs,
+          result = { hunks = {}, status = "changed" },
+          ft = vim.filetype.match({ filename = path }),
+        })
         return
       end
 
@@ -535,43 +640,88 @@ function M.setup_file_keymaps(review)
     comments.jump_comment(-1)
   end, vim.tbl_extend("force", opts, { desc = "Previous comment" }))
 
-  local help_lines = {
-    "plz review",
-    "",
-    "Navigation",
-    "  <Tab>/<S-Tab>   cycle collections",
-    "  1/2/3           jump to collection",
-    "  <C-w><C-w>      switch focus between top/bottom panes",
-    "",
-    "C1 — PR Detail (info + description / commits)",
-    "  <CR>            select commit → enter commit mode (in commits)",
-    "  <BS>            exit commit mode → return to PR",
-    "  o               open PR in browser",
-    "",
-    "C2 — Reviews (review list / threads)",
-    "  <CR>            select review → show threads below",
-    "  o               open review in browser",
-    "",
-    "C3 — Changes (file list / diff)",
-    "  <CR>            open diff for selected file",
-    "  ]f / [f         next/prev file (in diff)",
-    "  ]h / [h         next/prev hunk (in diff)",
-    "  ]c / [c         next/prev comment (cross-file)",
-    "  c               toggle comment at cursor (in diff)",
-    "  v               toggle file viewed",
-    "  o               open PR files in browser",
-    "",
-    "General",
-    "  q               close (diff → file list → exit review)",
-    "  <BS>            back (commit mode → PR view)",
-    "  ?               toggle this help",
-  }
+  -- Review action keymaps on file list
+  local actions = require("plz.review.actions")
+  vim.keymap.set("n", "A", function()
+    actions.prompt_submit_review("APPROVE")
+  end, vim.tbl_extend("force", opts, { desc = "Approve PR" }))
+
+  vim.keymap.set("n", "X", function()
+    actions.prompt_submit_review("REQUEST_CHANGES")
+  end, vim.tbl_extend("force", opts, { desc = "Request changes" }))
+
+  vim.keymap.set("n", "C", function()
+    actions.prompt_submit_review("COMMENT")
+  end, vim.tbl_extend("force", opts, { desc = "Submit comment review" }))
+
+  vim.keymap.set("n", "gc", function()
+    actions.prompt_add_comment()
+  end, vim.tbl_extend("force", opts, { desc = "Add PR comment" }))
+
+  --- Build context-dependent help lines based on active collection.
+  local function build_help()
+    local ac = state.active_collection or 3
+    local lines = {
+      "plz review",
+      "",
+      "Navigation",
+      "  <Tab>/<S-Tab>   cycle collections",
+      "  1/2/3           jump to collection",
+      "  <C-w><C-w>      switch focus between top/bottom panes",
+      "",
+    }
+    if ac == 1 then
+      vim.list_extend(lines, {
+        "C1 — PR Detail (info + description / commits)",
+        "  <CR>            select commit → enter commit mode",
+        "  <BS>            exit commit mode → return to PR",
+        "  o               open PR in browser",
+      })
+    elseif ac == 2 then
+      vim.list_extend(lines, {
+        "C2 — Reviews (review list / threads)",
+        "  <CR>            select review / go to comment in diff",
+        "  g               go to thread in diff (from top)",
+        "  r               reply to thread",
+        "  dd              delete review / comment",
+        "  R               resolve/unresolve thread",
+        "  o               open review in browser",
+      })
+    else
+      vim.list_extend(lines, {
+        "C3 — Changes (file list / diff)",
+        "  <CR>            open diff for selected file",
+        "  ]f / [f         next/prev file (in diff)",
+        "  ]h / [h         next/prev hunk (in diff)",
+        "  ]c / [c         next/prev comment (cross-file)",
+        "  c               toggle comment at cursor (in diff)",
+        "  cc              add inline comment at cursor (in diff)",
+        "  v               toggle file viewed",
+        "  o               open PR files in browser",
+      })
+    end
+    vim.list_extend(lines, {
+      "",
+      "Review Actions",
+      "  A               approve PR",
+      "  X               request changes",
+      "  C               submit comment review",
+      "  gc              add PR comment",
+      "",
+      "General",
+      "  q               close",
+      "  <BS>            back (commit mode → PR view)",
+      "  ?               toggle this help",
+    })
+    return lines
+  end
+
   vim.keymap.set("n", "?", function()
-    require("plz.help").toggle(help_lines)
+    require("plz.help").toggle(build_help())
   end, vim.tbl_extend("force", opts, { desc = "Toggle help" }))
 
-  -- Store help_lines so other collections can reuse
-  M._help_lines = help_lines
+  -- Store builder so other collections can use it
+  M._build_help = build_help
 end
 
 return M
