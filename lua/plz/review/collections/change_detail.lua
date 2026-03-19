@@ -1,5 +1,4 @@
 local gh = require("plz.gh")
-local diff = require("plz.diff")
 local comments = require("plz.review.comments")
 local files = require("plz.review.files")
 local layout = require("plz.review.layout")
@@ -89,67 +88,69 @@ function M.cleanup_old_bufs(old_lhs, old_rhs)
   end
 end
 
---- Populate diff windows with computed diff data.
-function M.populate_diff(data)
+--- Populate diff windows using Neovim's built-in :diffthis.
+--- If treediff is installed, its auto_highlight will fire automatically
+--- and overlay token-level red/green highlights.
+--- @param base_lines string[] Lines of the base (old) version
+--- @param head_lines string[] Lines of the head (new) version
+--- @param filename string Original filename (for filetype detection)
+function M.populate_diff(base_lines, head_lines, filename)
   local layout_mod = require("plz.diff.layout")
-  local render_mod = require("plz.diff.render")
-  local diff_mod = require("plz.diff")
 
   -- Remember old buffers so we can clean them up AFTER swapping
   local old_lhs = state.diff_lhs_buf
   local old_rhs = state.diff_rhs_buf
 
-  -- Extract texts and line number maps
-  local lhs_texts, lhs_nums = {}, {}
-  for i, entry in ipairs(data.padded_lhs) do
-    lhs_texts[i] = entry.text
-    if entry.orig ~= nil then lhs_nums[i] = entry.orig + 1 end
-  end
+  -- Detect filetype from filename
+  local ft = vim.filetype.match({ filename = filename }) or ""
 
-  local rhs_texts, rhs_nums = {}, {}
-  for i, entry in ipairs(data.padded_rhs) do
-    rhs_texts[i] = entry.text
-    if entry.orig ~= nil then rhs_nums[i] = entry.orig + 1 end
-  end
-
-  -- Create LHS buffer
+  -- Create LHS buffer (base)
   local lhs_buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_lines(lhs_buf, 0, -1, false, lhs_texts)
-  vim.bo[lhs_buf].modifiable = false
+  vim.api.nvim_buf_set_lines(lhs_buf, 0, -1, false, base_lines)
   vim.bo[lhs_buf].buftype = "nofile"
   vim.bo[lhs_buf].bufhidden = "wipe"
-  vim.bo[lhs_buf].filetype = "plz-diff"
-  layout_mod._line_nums[lhs_buf] = lhs_nums
+  vim.bo[lhs_buf].modifiable = false
+  if ft ~= "" then vim.bo[lhs_buf].filetype = ft end
 
-  -- Create RHS buffer
+  -- Create RHS buffer (head)
   local rhs_buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_lines(rhs_buf, 0, -1, false, rhs_texts)
-  vim.bo[rhs_buf].modifiable = false
+  vim.api.nvim_buf_set_lines(rhs_buf, 0, -1, false, head_lines)
   vim.bo[rhs_buf].buftype = "nofile"
   vim.bo[rhs_buf].bufhidden = "wipe"
-  vim.bo[rhs_buf].filetype = "plz-diff"
+  vim.bo[rhs_buf].modifiable = false
+  if ft ~= "" then vim.bo[rhs_buf].filetype = ft end
+
+  -- Build identity line number maps (buf line N → file line N)
+  -- Comments system uses layout._line_nums[buf][lnum] to map to original lines
+  local lhs_nums = {}
+  for i = 1, #base_lines do lhs_nums[i] = i end
+  layout_mod._line_nums[lhs_buf] = lhs_nums
+
+  local rhs_nums = {}
+  for i = 1, #head_lines do rhs_nums[i] = i end
   layout_mod._line_nums[rhs_buf] = rhs_nums
 
-  -- Set NEW buffers in windows FIRST (keeps windows alive)
+  -- Set buffers in windows
   vim.api.nvim_win_set_buf(state.diff_lhs_win, lhs_buf)
   vim.api.nvim_win_set_buf(state.diff_rhs_win, rhs_buf)
 
-  -- NOW safe to delete old buffers
+  -- Clean up old buffers now that windows have new ones
   M.cleanup_old_bufs(old_lhs, old_rhs)
+
+  -- Enable Neovim's built-in diff mode on both windows
+  vim.api.nvim_win_call(state.diff_lhs_win, function() vim.cmd("diffthis") end)
+  vim.api.nvim_win_call(state.diff_rhs_win, function() vim.cmd("diffthis") end)
 
   -- Window options
   for _, win in ipairs({ state.diff_lhs_win, state.diff_rhs_win }) do
-    vim.wo[win].scrollbind = true
-    vim.wo[win].cursorbind = true
-    vim.wo[win].number = false
-    vim.wo[win].relativenumber = false
-    vim.wo[win].signcolumn = "no"
     vim.wo[win].wrap = false
-    vim.wo[win].foldcolumn = "1"
+    vim.wo[win].signcolumn = "no"
     vim.wo[win].statuscolumn = "%{%v:lua.PlzDiffLineNr()%}"
     vim.wo[win].statusline = layout.plz_statusline()
   end
-  vim.cmd("syncbind")
+
+  -- Blank filler lines (no dashes)
+  vim.opt.fillchars:append("diff: ")
 
   state.diff_lhs_buf = lhs_buf
   state.diff_rhs_buf = rhs_buf
@@ -161,25 +162,7 @@ function M.populate_diff(data)
     rhs_win = state.diff_rhs_win,
   }
 
-  -- Apply highlights
-  render_mod.apply(lhs_buf, rhs_buf, data.result, data.padded_lhs, data.padded_rhs)
-
-  -- Collect comment lines so they are not folded away
-  local path = state.files[state.current_file_idx]
-  path = path and (path.filename or path.path) or ""
-  local rhs_comments = state.comments_by_file and state.comments_by_file[path] or {}
-  local lhs_comments = state.comments_by_file_left and state.comments_by_file_left[path] or {}
-  local comment_lines = { lhs = {}, rhs = {} }
-  for orig_line in pairs(rhs_comments) do comment_lines.rhs[orig_line] = true end
-  for orig_line in pairs(lhs_comments) do comment_lines.lhs[orig_line] = true end
-
-  -- Native vim folds over unchanged regions
-  diff_mod._setup_folds(diff_state, data.padded_lhs, data.padded_rhs, data.result, 3, comment_lines)
-
-  -- Hunk navigation
-  diff_mod._setup_hunk_navigation(diff_state, data.result, data.padded_lhs, data.padded_rhs)
-
-  -- File navigation and q keymap on diff buffers
+  -- File navigation and keymaps on diff buffers
   M.setup_diff_keymaps(diff_state)
 
   -- Show file position (sets winbar) then resize top to fit content
@@ -201,28 +184,10 @@ function M.populate_diff(data)
     state._jump_to_line = nil
     state._jump_to_path = nil
 
-    -- Find the buffer line that maps to this original line
-    local layout_mod = require("plz.diff.layout")
-    local rhs_nums = layout_mod._line_nums[state.diff_rhs_buf] or {}
-    local buf_line
-    for lnum, orig in pairs(rhs_nums) do
-      if orig == target_line then
-        buf_line = lnum
-        break
-      end
-    end
-    -- Fallback: try LHS
-    if not buf_line then
-      local lhs_nums = layout_mod._line_nums[state.diff_lhs_buf] or {}
-      for lnum, orig in pairs(lhs_nums) do
-        if orig == target_line then
-          buf_line = lnum
-          break
-        end
-      end
-    end
-
-    if buf_line then
+    -- With native diff, buffer lines == file lines directly
+    local buf_line = target_line
+    local line_count = vim.api.nvim_buf_line_count(state.diff_rhs_buf)
+    if buf_line >= 1 and buf_line <= line_count then
       -- Expand the comment at this line
       local side = "RIGHT"
       local key = side .. ":" .. state.diff_rhs_buf .. ":" .. buf_line
@@ -246,7 +211,7 @@ function M.clear_diff_status()
   vim.cmd("redrawstatus")
 end
 
---- Set up keymaps on diff buffers (file nav, q).
+--- Set up keymaps on diff buffers (file nav, q, hunk nav, comments, etc).
 function M.setup_diff_keymaps(diff_state)
   for _, buf in ipairs({ diff_state.lhs_buf, diff_state.rhs_buf }) do
     if vim.api.nvim_buf_is_valid(buf) then
@@ -265,6 +230,10 @@ function M.setup_diff_keymaps(diff_state)
           vim.notify("plz: first file", vim.log.levels.INFO)
         end
       end, { buffer = buf, desc = "Previous file" })
+
+      -- Hunk navigation: use Neovim's built-in diff ]c/[c
+      vim.keymap.set("n", "]h", "]c", { buffer = buf, remap = true, desc = "Next hunk" })
+      vim.keymap.set("n", "[h", "[c", { buffer = buf, remap = true, desc = "Previous hunk" })
 
       vim.keymap.set("n", "q", function()
         local review = require("plz.review")
@@ -312,15 +281,9 @@ function M.setup_diff_keymaps(diff_state)
 
       -- Inline comment at cursor
       vim.keymap.set("n", "cc", function()
-        local layout_mod = require("plz.diff.layout")
         local cursor_lnum = vim.api.nvim_win_get_cursor(0)[1]
         local cur_buf = vim.api.nvim_get_current_buf()
-        local nums = layout_mod._line_nums[cur_buf]
-        local orig_line = nums and nums[cursor_lnum]
-        if not orig_line then
-          vim.notify("plz: no file line at cursor", vim.log.levels.WARN)
-          return
-        end
+        local orig_line = cursor_lnum  -- buffer lines == file lines with native diff
         local side = (cur_buf == diff_state.lhs_buf) and "LEFT" or "RIGHT"
         local file = state.files[state.current_file_idx]
         if not file then return end
@@ -342,57 +305,8 @@ function M.setup_diff_keymaps(diff_state)
   end
 end
 
---- Build synthetic diff data for a fully added file.
---- @param content string Raw file content
---- @param filename string Filename (for filetype detection)
---- @return table|nil
-function M.synthetic_added(content, filename)
-  local lines = vim.split(content, "\n", { plain = true })
-  if #lines > 0 and lines[#lines] == "" then table.remove(lines) end
-  if #lines == 0 then return nil end
-
-  local padded_lhs, padded_rhs = {}, {}
-  local entries = {}
-  for i, line in ipairs(lines) do
-    table.insert(padded_lhs, { text = "", orig = nil })
-    table.insert(padded_rhs, { text = line, orig = i - 1 })
-    table.insert(entries, { type = "add", rhs_line = i - 1, rhs_changes = {} })
-  end
-
-  return {
-    padded_lhs = padded_lhs,
-    padded_rhs = padded_rhs,
-    result = { hunks = { { entries = entries } }, status = "changed" },
-    ft = vim.filetype.match({ filename = filename }),
-  }
-end
-
---- Build synthetic diff data for a fully removed file.
---- @param content string Raw file content
---- @param filename string Filename (for filetype detection)
---- @return table|nil
-function M.synthetic_removed(content, filename)
-  local lines = vim.split(content, "\n", { plain = true })
-  if #lines > 0 and lines[#lines] == "" then table.remove(lines) end
-  if #lines == 0 then return nil end
-
-  local padded_lhs, padded_rhs = {}, {}
-  local entries = {}
-  for i, line in ipairs(lines) do
-    table.insert(padded_lhs, { text = line, orig = i - 1 })
-    table.insert(padded_rhs, { text = "", orig = nil })
-    table.insert(entries, { type = "remove", lhs_line = i - 1, lhs_changes = {} })
-  end
-
-  return {
-    padded_lhs = padded_lhs,
-    padded_rhs = padded_rhs,
-    result = { hunks = { { entries = entries } }, status = "changed" },
-    ft = vim.filetype.match({ filename = filename }),
-  }
-end
-
---- Open difftastic diff for a file below the file list.
+--- Open diff for a file below the file list.
+--- Fetches base/head content via git and uses Neovim's :diffthis.
 function M.open_diff(file_idx)
   local file = state.files[file_idx]
   local path = file.filename or file.path
@@ -421,15 +335,6 @@ function M.open_diff(file_idx)
     end)
   end
 
-  -- Create temp files
-  local tmp_dir = vim.fn.tempname()
-  vim.fn.mkdir(tmp_dir .. "/base", "p")
-  vim.fn.mkdir(tmp_dir .. "/head", "p")
-
-  local basename = vim.fn.fnamemodify(path, ":t")
-  local base_path = tmp_dir .. "/base/" .. basename
-  local head_path = tmp_dir .. "/head/" .. basename
-
   local pending = 2
   local base_content = ""
   local head_content = ""
@@ -439,80 +344,29 @@ function M.open_diff(file_idx)
     return state.diff_gen ~= gen or state.active_collection ~= 3
   end
 
-  local function show_diff(data)
-    if is_stale() then return end
-    if not state.diff_lhs_win or not vim.api.nvim_win_is_valid(state.diff_lhs_win) then
-      M.create_diff_split()
-    end
-    M.populate_diff(data)
-  end
-
   local function on_ready()
     pending = pending - 1
     if pending > 0 then return end
     if is_stale() then return end
 
-    local file_status = file.status or "modified"
-
-    -- Added files: bypass difftastic, all RHS lines are new
-    if file_status == "added" then
-      local data = M.synthetic_added(head_content, path)
-      if not data then
-        vim.notify("plz: empty file", vim.log.levels.INFO)
-        return
-      end
-      show_diff(data)
-      return
+    -- Ensure diff split exists
+    if not state.diff_lhs_win or not vim.api.nvim_win_is_valid(state.diff_lhs_win) then
+      M.create_diff_split()
     end
 
-    -- Removed files: bypass difftastic, all LHS lines are deleted
-    if file_status == "removed" then
-      local data = M.synthetic_removed(base_content, path)
-      if not data then
-        vim.notify("plz: empty file", vim.log.levels.INFO)
-        return
-      end
-      show_diff(data)
-      return
+    -- Split content into lines
+    local base_lines = vim.split(base_content, "\n", { plain = true })
+    local head_lines = vim.split(head_content, "\n", { plain = true })
+    -- Remove trailing empty line from git output
+    if #base_lines > 0 and base_lines[#base_lines] == "" then table.remove(base_lines) end
+    if #head_lines > 0 and head_lines[#head_lines] == "" then table.remove(head_lines) end
+
+    -- For identical files, just notify
+    if base_content == head_content then
+      vim.notify("plz: " .. vim.fn.fnamemodify(path, ":t") .. " — files are identical", vim.log.levels.INFO)
     end
 
-    -- Write temp files
-    local f = io.open(base_path, "w")
-    if f then f:write(base_content); f:close() end
-    f = io.open(head_path, "w")
-    if f then f:write(head_content); f:close() end
-
-    -- Compute diff (async — difftastic runs in background)
-    diff.compute(base_path, head_path, function(data, err, unchanged)
-      if is_stale() then return end
-      if unchanged then
-        vim.notify("plz: " .. vim.fn.fnamemodify(path, ":t") .. " — files are identical", vim.log.levels.INFO)
-        return
-      end
-      if err then
-        -- Fallback: show as side-by-side plain text (no syntax diff)
-        vim.notify("plz: difft failed, showing plain diff", vim.log.levels.WARN)
-        local old_lines = vim.split(base_content, "\n", { plain = true })
-        local new_lines = vim.split(head_content, "\n", { plain = true })
-        if #old_lines > 0 and old_lines[#old_lines] == "" then table.remove(old_lines) end
-        if #new_lines > 0 and new_lines[#new_lines] == "" then table.remove(new_lines) end
-        local max = math.max(#old_lines, #new_lines)
-        local padded_lhs, padded_rhs = {}, {}
-        for i = 1, max do
-          table.insert(padded_lhs, { text = old_lines[i] or "", orig = i <= #old_lines and (i - 1) or nil })
-          table.insert(padded_rhs, { text = new_lines[i] or "", orig = i <= #new_lines and (i - 1) or nil })
-        end
-        show_diff({
-          padded_lhs = padded_lhs,
-          padded_rhs = padded_rhs,
-          result = { hunks = {}, status = "changed" },
-          ft = vim.filetype.match({ filename = path }),
-        })
-        return
-      end
-
-      show_diff(data)
-    end)
+    M.populate_diff(base_lines, head_lines, path)
   end
 
   -- Fetch base version
@@ -546,6 +400,14 @@ end
 
 --- Close the diff area, return focus to file list.
 function M.close_diff()
+  -- Turn off diff mode before closing
+  if state.diff_lhs_win and vim.api.nvim_win_is_valid(state.diff_lhs_win) then
+    vim.api.nvim_win_call(state.diff_lhs_win, function() pcall(vim.cmd, "diffoff") end)
+  end
+  if state.diff_rhs_win and vim.api.nvim_win_is_valid(state.diff_rhs_win) then
+    vim.api.nvim_win_call(state.diff_rhs_win, function() pcall(vim.cmd, "diffoff") end)
+  end
+
   -- Safe to delete buffers here — we're closing the windows right after
   M.cleanup_old_bufs(state.diff_lhs_buf, state.diff_rhs_buf)
   state.diff_lhs_buf = nil

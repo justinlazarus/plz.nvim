@@ -334,6 +334,12 @@ function M.switch_to(id)
   if state.active_collection == 3 then
     -- Bump generation to invalidate any in-flight diff callbacks
     state.diff_gen = (state.diff_gen or 0) + 1
+    -- Turn off diff mode before cleaning up
+    for _, key in ipairs({ "diff_lhs_win", "diff_rhs_win" }) do
+      if state[key] and vim.api.nvim_win_is_valid(state[key]) then
+        pcall(vim.api.nvim_win_call, state[key], function() vim.cmd("diffoff") end)
+      end
+    end
     review._cleanup_old_bufs(state.diff_lhs_buf, state.diff_rhs_buf)
     state.diff_lhs_buf = nil
     state.diff_rhs_buf = nil

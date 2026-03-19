@@ -18,7 +18,7 @@ vim.api.nvim_create_user_command("PlzDiff", function(args)
 end, {
   nargs = "*",
   complete = "file",
-  desc = "Open difftastic side-by-side diff view",
+  desc = "Open side-by-side diff view",
 })
 
 vim.api.nvim_create_user_command("Plz", function()
