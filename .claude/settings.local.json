@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(printf '%s' \"\" | hexdump -C | head -1 && printf '%s' \"󰜘\" | hexdump -C | head -1)",
+      "WebFetch(domain:docs.github.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(gh issue:*)",
+      "Bash(gh auth:*)",
+      "Bash(git add:*)",
+      "Bash(git -C /Users/djpoo/plz log --oneline -10)",
+      "WebFetch(domain:hiphish.github.io)",
+      "WebFetch(domain:mrcjkb.dev)",
+      "WebFetch(domain:charm.land)",
+      "Bash(luarocks --local list 2>/dev/null | head -20; echo \"---\"; which busted 2>/dev/null || echo \"busted not found\"; which nlua 2>/dev/null || echo \"nlua not found\")",
+      "Bash(luarocks --local install nlua && luarocks --local install busted)",
+      "Bash(luarocks --local --lua-dir=/opt/homebrew/opt/luajit --lua-version 5.1 install nlua 2>&1 | tail -3)",
+      "Bash(lua -e 'print\\(#\"│\"\\)')",
+      "Bash(nlua spec/plz/render_spec.lua 2>&1 || busted spec/ 2>&1 | head -40)",
+      "Bash(busted spec/ 2>&1)",
+      "Bash(DFT_UNSTABLE=yes difft --display=json /tmp/test_old.txt /tmp/test_new.txt)",
+      "Bash(difft --width=200 /tmp/test_old.txt /tmp/test_new.txt)",
+      "Bash(difft --display=side-by-side-show-both /tmp/test_old.txt /tmp/test_new.txt)",
+      "WebFetch(domain:difftastic.wilfred.me.uk)",
+      "WebFetch(domain:neovim.io)",
+      "WebFetch(domain:www.reddit.com)",
+      "WebFetch(domain:www.wilfred.me.uk)",
+      "Bash(mkdir -p ~/sdiff.nvim/lua/sdiff)",
+      "Read(//Users/djpoo/**)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(cargo build:*)",
+      "Bash(nvim:*)",
+      "Bash(mv ~/treediff.nvim/tests/smoke.rs ~/treediff.nvim/examples/smoke.rs)",
+      "Bash(mkdir -p ~/treediff.nvim/examples)",
+      "Bash(cargo run:*)"
+    ]
+  }
+}
