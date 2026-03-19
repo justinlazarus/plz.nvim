@@ -1,34 +1,35 @@
 # plz.nvim
 
-PR review workflow for Neovim. Dashboard, difftastic diffs, and code review without leaving your editor.
+PR review workflow for Neovim. Dashboard, structural diffs, and code review without leaving your editor.
 
 - **Dashboard** — gh-dash style PR triage
-- **Difftastic diffs** — syntax-aware, token-level structural diffs
+- **Structural diffs** — Neovim's built-in diff mode, enhanced with token-level highlights when [treediff.nvim](https://github.com/justinlazarus/treediff.nvim) is installed
 - **Review** — file list, inline threads, commit-by-commit view
 - **ADO integration** — Azure DevOps work item context in the PR view
-
-Zero plugin dependencies.
 
 ## Requirements
 
 - Neovim >= 0.10
 - [`gh`](https://cli.github.com/) CLI (authenticated)
-- [`difft`](https://difftastic.wilfred.me.uk/) (difftastic)
 
 Optional:
-- `wt` (worktrunk) for worktree-based file exploration with LSP
+- [treediff.nvim](https://github.com/justinlazarus/treediff.nvim) for token-level structural diff highlighting
 - `ADO_PAT` env var for Azure DevOps work items
 
 ## Install
 
 **vim.pack**
 ```lua
-require('vim.pack').add('justinlazarus/plz.nvim')
+vim.pack.add({
+  'https://github.com/justinlazarus/plz.nvim',
+  'https://github.com/justinlazarus/treediff.nvim',  -- optional, for structural diffs
+})
 ```
 
 **lazy.nvim**
 ```lua
 { 'justinlazarus/plz.nvim' }
+{ 'justinlazarus/treediff.nvim' }  -- optional
 ```
 
 **Manual**
@@ -41,22 +42,10 @@ git clone https://github.com/justinlazarus/plz.nvim.git \
 
 ```lua
 -- All defaults, setup() is optional
-require('plz').setup({
-  diff = {
-    layout = "side-by-side",
-    context = 3,
-  },
-  worktree = {
-    auto_create = true,
-    auto_cleanup = true,
-  },
-  -- Azure DevOps (optional)
-  ado = {
-    org = "your-org",
-    project = "Your Project",
-    pat_env = "ADO_PAT",
-  },
-})
+require('plz').setup()
+
+-- Optional: enable treediff for token-level diff highlights
+require('treediff').setup()
 ```
 
 ## Usage
@@ -64,7 +53,7 @@ require('plz').setup({
 | Command | Description |
 |---------|-------------|
 | `:Plz` | Open the dashboard |
-| `:PlzDiff <old> <new>` | Diff two local files with difftastic |
+| `:PlzDiff <old> <new>` | Diff two local files side-by-side |
 
 ### Dashboard
 
@@ -82,15 +71,29 @@ require('plz').setup({
 
 ### Review
 
+Three collections accessible via `1`/`2`/`3` or `<Tab>`/`<S-Tab>`:
+
+**C1 — PR Detail**: Info, description, and commits. `<CR>` on a commit enters commit mode.
+
+**C2 — Reviews**: Review threads with resolution status. `<CR>` jumps to the comment in the diff.
+
+**C3 — Changes**: File list + side-by-side diff.
+
 | Key | Action |
 |-----|--------|
-| `j/k` | Navigate files |
-| `<CR>` | Open diff / select commit |
-| `<Tab>` | Cycle summary (Info / Commits / Description) |
+| `<CR>` | Open diff / select item |
 | `]f` / `[f` | Next / prev file |
 | `]h` / `[h` | Next / prev hunk |
+| `]c` / `[c` | Next / prev comment (cross-file) |
+| `c` | Toggle comment at cursor |
+| `cc` | Add inline comment at cursor |
+| `v` | Toggle file viewed |
+| `A` | Approve PR |
+| `X` | Request changes |
+| `C` | Submit comment review |
+| `gc` | Add PR comment |
 | `o` | Open in browser |
-| `<BS>` / `q` | Back |
+| `q` | Close |
 | `?` | Help |
 
 ## License
