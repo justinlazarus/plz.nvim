@@ -139,6 +139,21 @@ function M.populate_diff(base_lines, head_lines, filename)
     rhs_win = state.diff_rhs_win,
   }
 
+  -- Sync wrapped-line alignment (virtual blank lines to keep sides aligned)
+  local ok_render, td_render = pcall(require, "treediff.render")
+  if ok_render and td_render.sync_wrap_alignment then
+    td_render.sync_wrap_alignment(state.diff_lhs_win, state.diff_rhs_win, state.diff_lhs_buf, state.diff_rhs_buf)
+    local lw, rw, lb, rb = state.diff_lhs_win, state.diff_rhs_win, state.diff_lhs_buf, state.diff_rhs_buf
+    vim.api.nvim_create_autocmd("WinResized", {
+      group = vim.api.nvim_create_augroup("plz_wrap_align", { clear = true }),
+      callback = function()
+        if vim.api.nvim_win_is_valid(lw) and vim.api.nvim_win_is_valid(rw) then
+          td_render.sync_wrap_alignment(lw, rw, lb, rb)
+        end
+      end,
+    })
+  end
+
   -- File navigation and keymaps on diff buffers
   M.setup_diff_keymaps(diff_state)
 
