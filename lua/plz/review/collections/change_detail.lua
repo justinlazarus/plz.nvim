@@ -156,7 +156,7 @@ function M.populate_diff(base_lines, head_lines, filename)
       td_render.sync_wrap_alignment(lw, rw, lb, rb)
     end
     -- Also re-sync on window resize and on CursorHold (catches deferred layout changes)
-    vim.api.nvim_create_autocmd({ "WinResized", "WinScrolled" }, {
+    vim.api.nvim_create_autocmd({ "WinResized", "WinScrolled", "VimResized" }, {
       group = vim.api.nvim_create_augroup("plz_wrap_align", { clear = true }),
       callback = function()
         if vim.api.nvim_win_is_valid(lw) and vim.api.nvim_win_is_valid(rw)
