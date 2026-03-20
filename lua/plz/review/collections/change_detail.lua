@@ -103,7 +103,10 @@ local function use_treediff(ft)
 
   -- "auto": use treediff if tree-sitter parser exists for this filetype
   if ft == "" then return false end
-  local has_ts = pcall(vim.treesitter.language.inspect, ft)
+  -- Resolve ft → tree-sitter language name (e.g. "cs" → "c_sharp")
+  local ft_map_ok, ft_map = pcall(require, "treediff.ft_map")
+  local ts_lang = ft_map_ok and ft_map[ft] or ft
+  local has_ts = pcall(vim.treesitter.language.inspect, ts_lang)
   return has_ts
 end
 
