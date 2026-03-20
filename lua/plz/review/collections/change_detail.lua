@@ -291,6 +291,7 @@ function M._populate_diff_treediff(base_lines, head_lines, ft, old_lhs, old_rhs)
   vim.bo[lhs_buf].bufhidden = "wipe"
   vim.bo[lhs_buf].modifiable = false
   layout_mod._line_nums[lhs_buf] = lhs_nums
+  vim.b[lhs_buf].treediff_buf_to_file = lhs_maps.buf_to_file
 
   -- Create RHS buffer
   local rhs_buf = vim.api.nvim_create_buf(false, true)
@@ -299,6 +300,7 @@ function M._populate_diff_treediff(base_lines, head_lines, ft, old_lhs, old_rhs)
   vim.bo[rhs_buf].bufhidden = "wipe"
   vim.bo[rhs_buf].modifiable = false
   layout_mod._line_nums[rhs_buf] = rhs_nums
+  vim.b[rhs_buf].treediff_buf_to_file = rhs_maps.buf_to_file
 
   -- Set buffers in windows
   vim.api.nvim_win_set_buf(state.diff_lhs_win, lhs_buf)
@@ -339,7 +341,6 @@ function M._populate_diff_treediff(base_lines, head_lines, ft, old_lhs, old_rhs)
   for _, win in ipairs({ state.diff_lhs_win, state.diff_rhs_win }) do
     vim.wo[win].scrollbind = true
     vim.wo[win].cursorbind = true
-    vim.wo[win].diff = false
     vim.wo[win].wrap = false
     vim.wo[win].signcolumn = "no"
     vim.wo[win].foldmethod = "manual"
