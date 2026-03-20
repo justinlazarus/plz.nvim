@@ -4,6 +4,7 @@ M.config = {
   diff = {
     layout = "side-by-side",
     context = 3,
+    engine = "auto", -- "auto" (treediff if available, else native), "treediff", or "native"
   },
   worktree = {
     auto_create = true,

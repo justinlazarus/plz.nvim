@@ -88,6 +88,25 @@ function M.cleanup_old_bufs(old_lhs, old_rhs)
   end
 end
 
+--- Check if treediff engine should be used for the given filetype.
+--- @param ft string filetype
+--- @return boolean
+local function use_treediff(ft)
+  local plz_config = require("plz").config
+  local engine = plz_config.diff and plz_config.diff.engine or "auto"
+  if engine == "native" then return false end
+
+  local ok, td = pcall(require, "treediff")
+  if not ok or not td._native then return false end
+
+  if engine == "treediff" then return true end
+
+  -- "auto": use treediff if tree-sitter parser exists for this filetype
+  if ft == "" then return false end
+  local has_ts = pcall(vim.treesitter.language.inspect, ft)
+  return has_ts
+end
+
 --- Populate diff windows using Neovim's built-in :diffthis.
 --- If treediff is installed, its auto_highlight will fire automatically
 --- and overlay token-level red/green highlights.
@@ -104,60 +123,15 @@ function M.populate_diff(base_lines, head_lines, filename)
   -- Detect filetype from filename
   local ft = vim.filetype.match({ filename = filename }) or ""
 
-  -- Create LHS buffer (base)
-  local lhs_buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_lines(lhs_buf, 0, -1, false, base_lines)
-  vim.bo[lhs_buf].buftype = "nofile"
-  vim.bo[lhs_buf].bufhidden = "wipe"
-  vim.bo[lhs_buf].modifiable = false
-  if ft ~= "" then vim.bo[lhs_buf].filetype = ft end
-
-  -- Create RHS buffer (head)
-  local rhs_buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_lines(rhs_buf, 0, -1, false, head_lines)
-  vim.bo[rhs_buf].buftype = "nofile"
-  vim.bo[rhs_buf].bufhidden = "wipe"
-  vim.bo[rhs_buf].modifiable = false
-  if ft ~= "" then vim.bo[rhs_buf].filetype = ft end
-
-  -- Build identity line number maps (buf line N → file line N)
-  -- Comments system uses layout._line_nums[buf][lnum] to map to original lines
-  local lhs_nums = {}
-  for i = 1, #base_lines do lhs_nums[i] = i end
-  layout_mod._line_nums[lhs_buf] = lhs_nums
-
-  local rhs_nums = {}
-  for i = 1, #head_lines do rhs_nums[i] = i end
-  layout_mod._line_nums[rhs_buf] = rhs_nums
-
-  -- Set buffers in windows
-  vim.api.nvim_win_set_buf(state.diff_lhs_win, lhs_buf)
-  vim.api.nvim_win_set_buf(state.diff_rhs_win, rhs_buf)
-
-  -- Clean up old buffers now that windows have new ones
-  M.cleanup_old_bufs(old_lhs, old_rhs)
-
-  -- Enable Neovim's built-in diff mode on both windows
-  vim.api.nvim_win_call(state.diff_lhs_win, function() vim.cmd("diffthis") end)
-  vim.api.nvim_win_call(state.diff_rhs_win, function() vim.cmd("diffthis") end)
-
-  -- Window options
-  for _, win in ipairs({ state.diff_lhs_win, state.diff_rhs_win }) do
-    vim.wo[win].wrap = false
-    vim.wo[win].signcolumn = "no"
-    vim.wo[win].statuscolumn = "%{%v:lua.PlzDiffLineNr()%}"
-    vim.wo[win].statusline = layout.plz_statusline()
+  if use_treediff(ft) then
+    M._populate_diff_treediff(base_lines, head_lines, ft, old_lhs, old_rhs)
+  else
+    M._populate_diff_native(base_lines, head_lines, ft, old_lhs, old_rhs)
   end
 
-  -- Blank filler lines (no dashes)
-  vim.opt.fillchars:append("diff: ")
-
-  state.diff_lhs_buf = lhs_buf
-  state.diff_rhs_buf = rhs_buf
-
   local diff_state = {
-    lhs_buf = lhs_buf,
-    rhs_buf = rhs_buf,
+    lhs_buf = state.diff_lhs_buf,
+    rhs_buf = state.diff_rhs_buf,
     lhs_win = state.diff_lhs_win,
     rhs_win = state.diff_rhs_win,
   }
@@ -184,8 +158,17 @@ function M.populate_diff(base_lines, head_lines, filename)
     state._jump_to_line = nil
     state._jump_to_path = nil
 
-    -- With native diff, buffer lines == file lines directly
-    local buf_line = target_line
+    -- Find the buffer line for this file line (may differ with treediff alignment)
+    local rhs_nums = layout_mod._line_nums[state.diff_rhs_buf] or {}
+    local buf_line
+    for bl, fl in pairs(rhs_nums) do
+      if fl == target_line then
+        buf_line = bl
+        break
+      end
+    end
+    buf_line = buf_line or target_line  -- fallback to identity
+
     local line_count = vim.api.nvim_buf_line_count(state.diff_rhs_buf)
     if buf_line >= 1 and buf_line <= line_count then
       -- Expand the comment at this line
@@ -204,6 +187,173 @@ function M.populate_diff(base_lines, head_lines, filename)
   end
 
   state._suppress_diff_focus = nil
+end
+
+--- Native diff path: uses Neovim's :diffthis with identity line maps.
+function M._populate_diff_native(base_lines, head_lines, ft, old_lhs, old_rhs)
+  local layout_mod = require("plz.diff.layout")
+
+  local lhs_buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(lhs_buf, 0, -1, false, base_lines)
+  vim.bo[lhs_buf].buftype = "nofile"
+  vim.bo[lhs_buf].bufhidden = "wipe"
+  vim.bo[lhs_buf].modifiable = false
+  if ft ~= "" then vim.bo[lhs_buf].filetype = ft end
+
+  local rhs_buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(rhs_buf, 0, -1, false, head_lines)
+  vim.bo[rhs_buf].buftype = "nofile"
+  vim.bo[rhs_buf].bufhidden = "wipe"
+  vim.bo[rhs_buf].modifiable = false
+  if ft ~= "" then vim.bo[rhs_buf].filetype = ft end
+
+  -- Identity line maps (buf line N → file line N)
+  local lhs_nums = {}
+  for i = 1, #base_lines do lhs_nums[i] = i end
+  layout_mod._line_nums[lhs_buf] = lhs_nums
+
+  local rhs_nums = {}
+  for i = 1, #head_lines do rhs_nums[i] = i end
+  layout_mod._line_nums[rhs_buf] = rhs_nums
+
+  vim.api.nvim_win_set_buf(state.diff_lhs_win, lhs_buf)
+  vim.api.nvim_win_set_buf(state.diff_rhs_win, rhs_buf)
+  M.cleanup_old_bufs(old_lhs, old_rhs)
+
+  vim.api.nvim_win_call(state.diff_lhs_win, function() vim.cmd("diffthis") end)
+  vim.api.nvim_win_call(state.diff_rhs_win, function() vim.cmd("diffthis") end)
+
+  for _, win in ipairs({ state.diff_lhs_win, state.diff_rhs_win }) do
+    vim.wo[win].wrap = false
+    vim.wo[win].signcolumn = "no"
+    vim.wo[win].statuscolumn = "%{%v:lua.PlzDiffLineNr()%}"
+    vim.wo[win].statusline = layout.plz_statusline()
+  end
+
+  vim.opt.fillchars:append("diff: ")
+
+  state.diff_lhs_buf = lhs_buf
+  state.diff_rhs_buf = rhs_buf
+end
+
+--- Treediff path: tree-aware alignment with token highlights.
+function M._populate_diff_treediff(base_lines, head_lines, ft, old_lhs, old_rhs)
+  local layout_mod = require("plz.diff.layout")
+  local treediff = require("treediff")
+  local align = require("treediff.align")
+  local highlight = require("treediff.highlight")
+  local ft_map = require("treediff.ft_map")
+
+  local lang = ft_map[ft] or ft
+  local lhs_text = table.concat(base_lines, "\n") .. "\n"
+  local rhs_text = table.concat(head_lines, "\n") .. "\n"
+
+  -- Run structural diff
+  local result = treediff.diff(lhs_text, rhs_text, lang)
+  if not result then
+    -- Fallback to native if diff fails
+    M._populate_diff_native(base_lines, head_lines, ft, old_lhs, old_rhs)
+    return
+  end
+
+  -- Build aligned padded arrays
+  local aligned = align.build(base_lines, head_lines, result.anchors)
+  local lhs_maps = align.build_maps(aligned.lhs_padded)
+  local rhs_maps = align.build_maps(aligned.rhs_padded)
+
+  -- Extract text arrays and build line number maps for Plz's comment system
+  -- layout._line_nums expects: buf_lnum (1-indexed) → file_line (1-indexed)
+  local lhs_texts = {}
+  local lhs_nums = {}
+  for i, entry in ipairs(aligned.lhs_padded) do
+    lhs_texts[i] = entry.text
+    if entry.orig ~= nil then
+      lhs_nums[i] = entry.orig + 1  -- 0-indexed → 1-indexed
+    end
+  end
+
+  local rhs_texts = {}
+  local rhs_nums = {}
+  for i, entry in ipairs(aligned.rhs_padded) do
+    rhs_texts[i] = entry.text
+    if entry.orig ~= nil then
+      rhs_nums[i] = entry.orig + 1
+    end
+  end
+
+  -- Create LHS buffer
+  local lhs_buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(lhs_buf, 0, -1, false, lhs_texts)
+  vim.bo[lhs_buf].buftype = "nofile"
+  vim.bo[lhs_buf].bufhidden = "wipe"
+  vim.bo[lhs_buf].modifiable = false
+  layout_mod._line_nums[lhs_buf] = lhs_nums
+
+  -- Create RHS buffer
+  local rhs_buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(rhs_buf, 0, -1, false, rhs_texts)
+  vim.bo[rhs_buf].buftype = "nofile"
+  vim.bo[rhs_buf].bufhidden = "wipe"
+  vim.bo[rhs_buf].modifiable = false
+  layout_mod._line_nums[rhs_buf] = rhs_nums
+
+  -- Set buffers in windows
+  vim.api.nvim_win_set_buf(state.diff_lhs_win, lhs_buf)
+  vim.api.nvim_win_set_buf(state.diff_rhs_win, rhs_buf)
+  M.cleanup_old_bufs(old_lhs, old_rhs)
+
+  -- Token highlights
+  vim.api.nvim_set_hl(0, "TreeDiffDelete", { fg = "#ff6e6e", bold = true })
+  vim.api.nvim_set_hl(0, "TreeDiffAdd", { fg = "#6eff6e", bold = true })
+  vim.api.nvim_set_hl(0, "TreeDiffDeleteNr", { fg = "#ff6e6e", bold = true })
+  vim.api.nvim_set_hl(0, "TreeDiffAddNr", { fg = "#6eff6e", bold = true })
+  vim.api.nvim_set_hl(0, "TreeDiffFiller", { bg = "#1a1a2e", default = true })
+
+  -- Place token extmarks with coordinate translation
+  highlight.place_marks_mapped(lhs_buf, result.lhs_tokens or {}, "TreeDiffDelete", "TreeDiffDeleteNr", lhs_maps.file_to_buf)
+  highlight.place_marks_mapped(rhs_buf, result.rhs_tokens or {}, "TreeDiffAdd", "TreeDiffAddNr", rhs_maps.file_to_buf)
+
+  -- Highlight filler rows
+  local ns = highlight.namespace()
+  for i, entry in ipairs(aligned.lhs_padded) do
+    if not entry.orig then
+      pcall(vim.api.nvim_buf_set_extmark, lhs_buf, ns, i - 1, 0, {
+        end_row = i - 1, end_col = 0, hl_eol = true,
+        hl_group = "TreeDiffFiller", priority = 50,
+      })
+    end
+  end
+  for i, entry in ipairs(aligned.rhs_padded) do
+    if not entry.orig then
+      pcall(vim.api.nvim_buf_set_extmark, rhs_buf, ns, i - 1, 0, {
+        end_row = i - 1, end_col = 0, hl_eol = true,
+        hl_group = "TreeDiffFiller", priority = 50,
+      })
+    end
+  end
+
+  -- Window options: scrollbind instead of diffthis
+  for _, win in ipairs({ state.diff_lhs_win, state.diff_rhs_win }) do
+    vim.wo[win].scrollbind = true
+    vim.wo[win].cursorbind = true
+    vim.wo[win].diff = false
+    vim.wo[win].wrap = false
+    vim.wo[win].signcolumn = "no"
+    vim.wo[win].foldmethod = "manual"
+    vim.wo[win].foldlevel = 999
+    vim.wo[win].statuscolumn = "%{%v:lua.PlzDiffLineNr()%}"
+    vim.wo[win].statusline = layout.plz_statusline()
+  end
+  vim.cmd("syncbind")
+
+  -- Stop treesitter/syntax so token highlights are clean
+  for _, buf in ipairs({ lhs_buf, rhs_buf }) do
+    pcall(vim.treesitter.stop, buf)
+    vim.bo[buf].syntax = ""
+  end
+
+  state.diff_lhs_buf = lhs_buf
+  state.diff_rhs_buf = rhs_buf
 end
 
 --- Refresh the statusline after diff state changes.
@@ -283,7 +433,9 @@ function M.setup_diff_keymaps(diff_state)
       vim.keymap.set("n", "cc", function()
         local cursor_lnum = vim.api.nvim_win_get_cursor(0)[1]
         local cur_buf = vim.api.nvim_get_current_buf()
-        local orig_line = cursor_lnum  -- buffer lines == file lines with native diff
+        local layout_mod = require("plz.diff.layout")
+        local line_nums = layout_mod._line_nums[cur_buf] or {}
+        local orig_line = line_nums[cursor_lnum] or cursor_lnum
         local side = (cur_buf == diff_state.lhs_buf) and "LEFT" or "RIGHT"
         local file = state.files[state.current_file_idx]
         if not file then return end
@@ -400,12 +552,15 @@ end
 
 --- Close the diff area, return focus to file list.
 function M.close_diff()
-  -- Turn off diff mode before closing
-  if state.diff_lhs_win and vim.api.nvim_win_is_valid(state.diff_lhs_win) then
-    vim.api.nvim_win_call(state.diff_lhs_win, function() pcall(vim.cmd, "diffoff") end)
-  end
-  if state.diff_rhs_win and vim.api.nvim_win_is_valid(state.diff_rhs_win) then
-    vim.api.nvim_win_call(state.diff_rhs_win, function() pcall(vim.cmd, "diffoff") end)
+  -- Turn off diff mode / scrollbind before closing
+  for _, win in ipairs({ state.diff_lhs_win, state.diff_rhs_win }) do
+    if win and vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_call(win, function()
+        pcall(vim.cmd, "diffoff")
+        vim.wo[win].scrollbind = false
+        vim.wo[win].cursorbind = false
+      end)
+    end
   end
 
   -- Safe to delete buffers here — we're closing the windows right after
