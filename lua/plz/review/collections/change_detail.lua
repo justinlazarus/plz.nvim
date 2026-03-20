@@ -344,7 +344,9 @@ function M._populate_diff_treediff(base_lines, head_lines, ft, old_lhs, old_rhs)
     vim.wo[win].wrap = false
     vim.wo[win].signcolumn = "no"
     vim.wo[win].foldmethod = "manual"
-    vim.wo[win].foldlevel = 999
+    vim.wo[win].foldlevel = 0
+    vim.wo[win].foldtext = ""
+    vim.wo[win].foldminlines = 1
     vim.wo[win].statuscolumn = "%{%v:lua.PlzDiffLineNr()%}"
     vim.wo[win].statusline = layout.plz_statusline()
   end
@@ -354,6 +356,67 @@ function M._populate_diff_treediff(base_lines, head_lines, ft, old_lhs, old_rhs)
   for _, buf in ipairs({ lhs_buf, rhs_buf }) do
     pcall(vim.treesitter.stop, buf)
     vim.bo[buf].syntax = ""
+  end
+
+  -- Fold unchanged regions (keep 3 context lines around changes)
+  local context = 3
+  local total_lines = #aligned.lhs_padded
+
+  -- Collect "interesting" rows: filler lines or lines with novel tokens
+  local interesting = {}
+  for i, e in ipairs(aligned.lhs_padded) do
+    if not e.orig then interesting[i] = true end
+  end
+  for i, e in ipairs(aligned.rhs_padded) do
+    if not e.orig then interesting[i] = true end
+  end
+  -- Mark rows with token highlights
+  for _, tok in ipairs(result.lhs_tokens or {}) do
+    local br = lhs_maps.file_to_buf[tok.line]
+    if br then interesting[br] = true end
+  end
+  for _, tok in ipairs(result.rhs_tokens or {}) do
+    local br = rhs_maps.file_to_buf[tok.line]
+    if br then interesting[br] = true end
+  end
+
+  -- Build sorted list of interesting rows
+  local changed_rows = {}
+  for r in pairs(interesting) do changed_rows[#changed_rows + 1] = r end
+  table.sort(changed_rows)
+
+  -- Compute fold ranges: gaps between interesting rows minus context
+  local fold_ranges = {}
+  local prev_end = 0  -- last row covered by previous interesting block + context
+
+  for _, r in ipairs(changed_rows) do
+    local block_start = r - context
+    if block_start > prev_end + 1 then
+      -- There's a foldable gap: from prev_end+1 to block_start-1
+      local fs = prev_end + 1
+      local fe = block_start - 1
+      if fe >= fs then
+        fold_ranges[#fold_ranges + 1] = { fs, fe }
+      end
+    end
+    prev_end = math.max(prev_end, r + context)
+  end
+  -- Trailing unchanged region
+  if prev_end < total_lines then
+    local fs = prev_end + 1
+    local fe = total_lines
+    if fe >= fs then
+      fold_ranges[#fold_ranges + 1] = { fs, fe }
+    end
+  end
+
+  -- Apply folds to both windows
+  for _, win in ipairs({ state.diff_lhs_win, state.diff_rhs_win }) do
+    vim.api.nvim_win_call(win, function()
+      for _, range in ipairs(fold_ranges) do
+        pcall(vim.cmd, range[1] .. "," .. range[2] .. "fold")
+      end
+    end)
   end
 
   state.diff_lhs_buf = lhs_buf
