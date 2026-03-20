@@ -379,6 +379,23 @@ function M._populate_diff_treediff(base_lines, head_lines, ft, old_lhs, old_rhs)
     local br = rhs_maps.file_to_buf[tok.line]
     if br then interesting[br] = true end
   end
+  -- Mark rows with comments so they're never folded
+  local file = state.files and state.files[state.current_file_idx]
+  local cpath = file and (file.filename or file.path) or ""
+  for _, side_map in ipairs({
+    { comments = state.comments_by_file or {}, nums = rhs_nums },
+    { comments = state.comments_by_file_left or {}, nums = lhs_nums },
+  }) do
+    local file_comments = side_map.comments[cpath] or {}
+    for orig_line, _ in pairs(file_comments) do
+      for buf_line, file_line in pairs(side_map.nums) do
+        if file_line == orig_line then
+          interesting[buf_line] = true
+          break
+        end
+      end
+    end
+  end
 
   -- Build sorted list of interesting rows
   local changed_rows = {}
