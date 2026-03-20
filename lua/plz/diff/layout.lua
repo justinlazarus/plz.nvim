@@ -5,6 +5,12 @@ local M = {}
 M._line_nums = {} -- buf -> {lnum -> display_number}
 M._line_hls = {}  -- buf -> {lnum -> hl_group}
 
+--- Fold text for diff buffers: show line count.
+function _G.PlzDiffFoldText()
+  local count = vim.v.foldend - vim.v.foldstart + 1
+  return "··· " .. count .. " lines ···"
+end
+
 --- Custom statuscolumn for aligned diff buffers.
 --- Shows real line numbers for file lines, "·" for filler lines.
 function _G.PlzDiffLineNr()
