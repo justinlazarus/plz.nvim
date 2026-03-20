@@ -14,6 +14,7 @@ end
 --- Custom statuscolumn for aligned diff buffers.
 --- Shows real line numbers for file lines, "·" for filler lines.
 function _G.PlzDiffLineNr()
+  if vim.v.virtnum > 0 then return "     " end
   local buf = vim.api.nvim_get_current_buf()
   local lnum = vim.v.lnum
   local nums = M._line_nums[buf]
