@@ -263,7 +263,7 @@ query {
           short_oid = c.abbreviatedOid or "",
           message = c.messageHeadline or "",
           date = c.committedDate or "",
-          author = (c.author and c.author.user and c.author.user.login)
+          author = (c.author and type(c.author.user) == "table" and c.author.user.login)
             or (c.author and c.author.name) or "",
           additions = type(c.additions) == "number" and c.additions or 0,
           deletions = type(c.deletions) == "number" and c.deletions or 0,
