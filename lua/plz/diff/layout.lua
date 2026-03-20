@@ -95,7 +95,9 @@ function M.side_by_side(padded_lhs, padded_rhs, opts)
     vim.wo[win].number = false
     vim.wo[win].relativenumber = false
     vim.wo[win].signcolumn = "no"
-    vim.wo[win].wrap = false
+    local ww = require("plz").config.diff.wordwrap
+    vim.wo[win].wrap = ww
+    vim.wo[win].linebreak = ww
     vim.wo[win].foldcolumn = "1"
     vim.wo[win].statuscolumn = "%{%v:lua.PlzDiffLineNr()%}"
   end

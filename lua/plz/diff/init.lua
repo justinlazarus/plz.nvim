@@ -78,7 +78,9 @@ function M._open_native(old_lines, new_lines, ft)
   vim.opt.fillchars:append("diff: ")
 
   for _, win in ipairs({ lhs_win, rhs_win }) do
-    vim.wo[win].wrap = false
+    local ww = require("plz").config.diff.wordwrap
+    vim.wo[win].wrap = ww
+    vim.wo[win].linebreak = ww
     vim.wo[win].signcolumn = "no"
   end
 

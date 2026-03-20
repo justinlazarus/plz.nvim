@@ -5,6 +5,7 @@ M.config = {
     layout = "side-by-side",
     context = 3,
     engine = "auto", -- "auto" (treediff if available, else native), "treediff", or "native"
+    wordwrap = true,
   },
   worktree = {
     auto_create = true,

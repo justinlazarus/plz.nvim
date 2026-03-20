@@ -227,7 +227,9 @@ function M._populate_diff_native(base_lines, head_lines, ft, old_lhs, old_rhs)
   vim.api.nvim_win_call(state.diff_rhs_win, function() vim.cmd("diffthis") end)
 
   for _, win in ipairs({ state.diff_lhs_win, state.diff_rhs_win }) do
-    vim.wo[win].wrap = false
+    local ww = require("plz").config.diff.wordwrap
+    vim.wo[win].wrap = ww
+    vim.wo[win].linebreak = ww
     vim.wo[win].signcolumn = "no"
     vim.wo[win].statuscolumn = "%{%v:lua.PlzDiffLineNr()%}"
     vim.wo[win].statusline = layout.plz_statusline()
@@ -341,7 +343,9 @@ function M._populate_diff_treediff(base_lines, head_lines, ft, old_lhs, old_rhs)
   for _, win in ipairs({ state.diff_lhs_win, state.diff_rhs_win }) do
     vim.wo[win].scrollbind = true
     vim.wo[win].cursorbind = true
-    vim.wo[win].wrap = false
+    local ww = require("plz").config.diff.wordwrap
+    vim.wo[win].wrap = ww
+    vim.wo[win].linebreak = ww
     vim.wo[win].signcolumn = "no"
     vim.wo[win].foldmethod = "manual"
     vim.wo[win].foldlevel = 0
